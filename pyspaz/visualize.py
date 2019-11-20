@@ -485,10 +485,10 @@ def optimize_detection_interactive(
 
     interact(
         update,
-        frame_idx = widgets.IntSlider(min = 0, max = n_frames, continuous_update = False),
-        sigma = widgets.FloatSlider(min = 0.4, max = 3.0, continuous_update = False),
-        detect_threshold = widgets.FloatSlider(min = 10.0, max = 30.0, continuous_update = False),
-        window_size = widgets.IntSlider(min = 3, max = 21, step = 2, continuous_update = False),
+        frame_idx = widgets.IntSlider(value = 0, min = 0, max = n_frames, continuous_update = False),
+        sigma = widgets.FloatSlider(value = 1.0, min = 0.4, max = 3.0, continuous_update = False),
+        detect_threshold = widgets.FloatSlider(value = 20.0, min = 10.0, max = 30.0, continuous_update = False),
+        window_size = widgets.IntSlider(value = 9, min = 3, max = 21, step = 2, continuous_update = False),
     )
 
 def optimize_detection_dog_interactive(
@@ -519,6 +519,14 @@ def optimize_detection_dog_interactive(
         ax[0,1].imshow(image_bg, cmap = 'gray')
         ax[1,0].imshow(image_filt, cmap = 'gray')
         ax[1,1].imshow(detections, cmap = 'gray')
+        for i in range(2):
+            for j in range(2):
+                ax[i,j].set_xticks([])
+                ax[i,j].set_yticks([])
+        ax[0,0].set_title('Original', fontdict = {'fontsize' : 30})
+        ax[0,1].set_title('conv w/ BG kernel', fontdict = {'fontsize' : 30})
+        ax[1,0].set_title('DoG-filtered', fontdict = {'fontsize' : 30})
+        ax[1,1].set_title('Detections', fontdict = {'fontsize' : 30})
 
         plt.show(); plt.close()
 
@@ -573,6 +581,14 @@ def optimize_detection_log_interactive(
         ax[0,1].imshow(image_filt, cmap = 'gray')
         ax[1,0].imshow(detections, cmap = 'gray')
         ax[1,1].imshow(plot_image, cmap = 'gray')
+        for i in range(2):
+            for j in range(2):
+                ax[i,j].set_xticks([])
+                ax[i,j].set_yticks([])
+        ax[0,0].set_title('Original', fontdict = {'fontsize' : 30})
+        ax[0,1].set_title('LoG-filtered', fontdict = {'fontsize' : 30})
+        ax[1,0].set_title('> threshold', fontdict = {'fontsize' : 30})
+        ax[1,1].set_title('Detections', fontdict = {'fontsize' : 30})
 
         plt.show(); plt.close()
 
