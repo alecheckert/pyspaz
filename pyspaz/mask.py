@@ -15,14 +15,99 @@ import tifffile
 import seaborn as sns
 sns.set(style = 'ticks')
 
+def onselect(verts):
+    with open('_verts.txt', 'w') as o:
+        for i, j in verts:
+            o.write('%f\t%f\n' % (i, j))
+
 def draw_mask_prompt(
     image_array,
-    n_masks,
-    white_out_image = None,
+    white_out_areas = None,
     user_prompt = None,
+    vmax_mod = 1.0,
 ):
+    '''
+    Prompt the user to draw a mask on an image.
+
+    args
+        image_array     :   2D ndarray, the image
+        white_out_areas :   2D ndarray of same shape as
+                                *image_array*, areas to
+                                white out in the image
+        user_prompt     :   str, prompt for user
+        vmax_mod        :   float, for intensity scaling
+
+    returns
+        binary 2D ndarray, the mask drawn by the user, and
+        matplotlib.Path, the edge path of that mask
+
+    '''
+    N, M = image_array.shape 
     fig, ax = plt.subplots(figsize = (10, 10))
-    ax.imshow()
+    plot_image = image_array.copy()
+    if type(white_out_areas) == type(np.array([])):
+        plot_image[white_out_areas > 0] = plot_image.max()
+    ax.imshow(
+        plot_image,
+        cmap='gray',
+        vmax = image_array.max() * vmax_mod
+    )
+    if type(user_prompt) == type(''):
+        ax.annotate(
+            user_prompt,
+            (10, 10),
+            color = 'w',
+            fontsize = 20
+        )
+    lasso = LassoSelector(ax, onselect)
+    plt.show(); plt.close()
+    verts = np.asarray(pd.read_csv('_verts.txt', sep = '\t', header = None))
+    path = Path(verts, closed = True)
+    y, x = np.mgrid[:N, :M]
+    points = np.transpose((x.ravel(), y.ravel()))
+    mask = path.contains_points(points).reshape((N, M)).astype('uint16')
+    return mask, path 
+
+def draw_n_masks_prompt(
+    image_array,
+    n_masks,
+    white_out_areas = None,
+    user_prompt = None,
+    vmax_mod = 1.0,
+):
+    if type(white_out_areas) != type(image_array):
+        white_out_areas = np.zeros(image_array.shape, dtype = 'uint16')
+    result = np.zeros(image_array.shape, dtype = 'uint16')
+    result_paths = []
+    c_idx = 0
+    while c_idx < n_masks:
+        mask, path = draw_mask_prompt(
+            image_array,
+            white_out_areas = white_out_areas,
+            user_prompt = '%s\nMask %d/%d' % (user_prompt, c_idx+1, n_masks),
+            vmax_mod = vmax_mod,
+        )
+        result_paths.append(path)
+        result = result + mask * (c_idx + 1)
+        white_out_areas = ((white_out_areas > 0) | (mask > 0)).astype('uint16')
+        c_idx += 1
+    return result, result_paths
+
+def assign_trajectories_to_mask(
+    mask_path,
+    trajs,
+    pixel_size_um_mask = 0.16,
+):
+    for traj_idx, traj in enumerate(trajs):
+        positions = traj[0] / pixels_per_um_mask 
+        in_mask = mask_path.contains_points(positions)
+        raise NotImplementedError
+
+
+
+
+# Implementation separation
+
 
 
 def single_mask_trajectories(

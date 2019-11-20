@@ -51,7 +51,6 @@ def track_locs_directory(
     y_diff = 0.9,
     start_frame = None,
     stop_frame = None,
-    verbose = True,
 ):
     '''
     Track all of the *.locs files in a given directory.
@@ -89,7 +88,6 @@ def track_locs_directory(
             y_diff = y_diff,
             start_frame = start_frame,
             stop_frame = stop_frame,
-            verbose = verbose,
         )
             
 
@@ -110,7 +108,6 @@ def track_locs(
     y_diff = 0.9,
     start_frame = None,
     stop_frame = None,
-    verbose = True,
 ):
     # The number of pixels in the detection / localization window
     n_pixels = window_size ** 2
@@ -225,7 +222,6 @@ def track_locs(
         # Otherwise, we have some number of trajectories and localizations.
         # First, compute the squared radial distance between the last
         # known position of each trajectory and each new localization
-        adjacency_matrix = np.zeros((n_trajs, n_locs), dtype = 'uint16')
         sq_radial_distances = utils.sq_radial_distance_array(
             np.asarray([traj.positions[-1, :] for traj in active_trajectories]),
             frame_locs[:,1:3],
@@ -318,36 +314,37 @@ def track_locs(
         completed_trajectories.append(copy(trajectory))
 
     # Save to file, if desired
-    if out_mat_file != None:
+    if out_mat_file == None:
+        out_mat_file = '%s_Tracked.mat' % loc_file.replace('.locs', '')
 
-        # Add tracking parameters to metadata
-        for k in metadata.keys():
-            if metadata[k] == None:
-                metadata[k] = 'None'
+    # Add tracking parameters to metadata
+    for k in metadata.keys():
+        if metadata[k] == None:
+            metadata[k] = 'None'
 
-        metadata['locs_used_for_tracking'] = loc_file
-        metadata['d_max'] = d_max
-        metadata['d_bound_naive'] = d_bound_naive
-        metadata['search_exp_fac'] = search_exp_fac
-        metadata['frame_interval_sec'] = frame_interval_sec
-        metadata['pixel_size_um'] = pixel_size_um
-        metadata['min_int'] = min_int
-        metadata['max_blinks'] = max_blinks
-        metadata['k_return_from_blink'] = k_return_from_blink
-        metadata['y_int'] = y_int
-        metadata['y_diff'] = y_diff 
-        metadata['tracking_start_frame'] = str(start_frame)
-        metadata['tracking_stop_frame'] = str(stop_frame)
+    metadata['locs_used_for_tracking'] = loc_file
+    metadata['d_max'] = d_max
+    metadata['d_bound_naive'] = d_bound_naive
+    metadata['search_exp_fac'] = search_exp_fac
+    metadata['frame_interval_sec'] = frame_interval_sec
+    metadata['pixel_size_um'] = pixel_size_um
+    metadata['min_int'] = min_int
+    metadata['max_blinks'] = max_blinks
+    metadata['k_return_from_blink'] = k_return_from_blink
+    metadata['y_int'] = y_int
+    metadata['y_diff'] = y_diff 
+    metadata['tracking_start_frame'] = str(start_frame)
+    metadata['tracking_stop_frame'] = str(stop_frame)
 
-        # Save to file
-        spazio.save_trajectory_obj_to_mat(
-            out_mat_file,
-            completed_trajectories,
-            metadata,
-            frame_interval_sec,
-            pixel_size_um = pixel_size_um,
-            convert_pixel_to_um = True,
-        )
+    # Save to file
+    spazio.save_trajectory_obj_to_mat(
+        out_mat_file,
+        completed_trajectories,
+        metadata,
+        frame_interval_sec,
+        pixel_size_um = pixel_size_um,
+        convert_pixel_to_um = True,
+    )
 
     # Return (trajs, metadata, traj_cols)
     return spazio.load_trajs(out_mat_file)
@@ -438,11 +435,12 @@ def assign(
     # If i >= n_trajs and j < n_locs, then LL[i,j] is the cost of starting
     # a new trajectory. This is set to the log-likelihood ratio for detection.
     for j in range(n_locs):
-        LL[n_trajs:, j] = localizations[j, 5]
+        #LL[n_trajs:, j] = localizations[j, 5]
+        LL[n_trajs:, j] = -10.0
 
     # If i < n_trajs and j >= n_locs, then LL[i,j] is the cost of putting
     # a trajectory into blink. This is set to a fixed value.
-    LL[:, n_locs:] = -6
+    LL[:, n_locs:] = -50
 
     # If i < n_trajs and j < n_locs, then LL[i,j] corresponds to the log-likelihood
     # of some traj-loc reconnection. This is the sum of three terms that depend
@@ -527,10 +525,10 @@ def assign(
 
         # Get the loc info
         loc_idx = assign_locs[traj_idx]
-        loc = localizations[loc_idx, :]
 
         # Index corresponds to a real localization
         if loc_idx < n_locs:
+            loc = localizations[loc_idx, :]
             trajectory = Trajectory(loc, sig2_bound_naive)
 
             # Pass the trajectory for reconnection in the next frame

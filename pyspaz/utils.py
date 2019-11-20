@@ -2,6 +2,7 @@
 utils.py
 '''
 import numpy as np 
+from munkres import Munkres 
 
 #
 # Localization utilities
@@ -50,7 +51,7 @@ def local_max_2d(image):
     return peaks.astype('bool')
 
 
-def gaussian_model(sigma, window_size):
+def gaussian_model(sigma, window_size, offset_by_half = False):
     '''
     Generate a model Gaussian PSF in a square array
     by sampling the value of the Gaussian in the center 
@@ -66,6 +67,9 @@ def gaussian_model(sigma, window_size):
     '''
     half_w = int(window_size) // 2
     ii, jj = np.mgrid[-half_w:half_w+1, -half_w:half_w+1]
+    if offset_by_half:
+        ii = ii - 0.5
+        jj = jj - 0.5
     sig2 = sigma ** 2
     g = np.exp(-((ii**2) + (jj**2)) / (2 * sig2)) / sig2 
     return g 
@@ -182,11 +186,13 @@ def connected_components(semigraph):
             
             # Assign connected nodes to the same subgraph index
             semigraph[where_y, :] *= current_idx
+            semigraph[semigraph > current_idx] = current_idx
             semigraph[:, where_x] *= current_idx
+            semigraph[semigraph > current_idx] = current_idx
             
             # Correct for re-finding the same nodes and multiplying
-            # them more than once
-            semigraph[semigraph > current_idx] = current_idx
+            # them more than once (implemented in the line above)
+            # semigraph[semigraph > current_idx] = current_idx
             
             # Update the node counts in this subgraph
             prev_nodes = curr_nodes
@@ -199,17 +205,18 @@ def connected_components(semigraph):
         where_x = np.unique(where_x)
 
         # Use the local indices to pull this subgraph out of the 
-        # bigger graph
+        # main graph 
         subgraph = semigraph[where_y, :]
         subgraph = subgraph[:, where_x]
 
         # Save the subgraph
-        subgraphs.append(subgraph)
+        if not (subgraph.shape[0] == 0 and subgraph.shape[0] == 0):
+            subgraphs.append(subgraph)
         
-        # Get the original y-nodes and x-nodes that were used in this
-        # subgraph
-        subgraph_y_indices.append(y_indices[where_y])
-        subgraph_x_indices.append(x_indices[where_x])
+            # Get the original y-nodes and x-nodes that were used in this
+            # subgraph
+            subgraph_y_indices.append(y_indices[where_y])
+            subgraph_x_indices.append(x_indices[where_x])
 
         # Update the list of unassigned y- and x-nodes
         unassigned_y, unassigned_x = (semigraph == 1).nonzero()
@@ -325,5 +332,28 @@ def mask_edge(mask):
     vert_mask = np.logical_or(edge_0, edge_1)
     return np.logical_or(horiz_mask, vert_mask)
 
+def track_objects(
+    positions_0, 
+    positions_1,
+    weight_function,
+):
+    m = Munkres()
+    n0 = positions_0.shape[0]
+    n1 = positions_1.shape[0]
+    n_max = max([n0, n1])
+
+    weight_matrix = np.zeros((n_max, n_max), dtype = 'float')
+    for idx_0 in range(n0):
+        for idx_1 in range(n1):
+            weight_matrix[idx_0, idx_1] = weight_function(
+                positions_0[idx_0, :],
+                positions_1[idx_1, :],
+            )
+    indexes = m.compute(weight_matrix)
+    return np.asarray(indexes)[:,1]
+
+def euclidean_distance(tuple_0, tuple_1):
+    return np.sqrt(((np.array(tuple_0) - \
+        np.array(tuple_1))**2).sum())
 
 

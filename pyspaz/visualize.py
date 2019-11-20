@@ -19,6 +19,7 @@ import pandas as pd
 import os
 import sys
 from . import spazio 
+from . import localize
 
 # Plotting
 import matplotlib.pyplot as plt 
@@ -54,6 +55,7 @@ def loc_density(
     vmax_mod = 1.0,
     cmap = 'gray',
     out_png = 'default_loc_density_out.png',
+    save_plot = True,
 ): 
     # Get the list of localized positions
     m_keys = list(metadata.keys())
@@ -109,7 +111,7 @@ def loc_density(
         if verbose:
             sys.stdout.write('Finished compiling the densities of %d/%d localizations...\r' % (loc_idx+1, n_locs))
             sys.stdout.flush()
-    if ax == None:
+    if (save_plot == True) and (ax == None):
         fig, ax = plt.subplots(figsize = (4, 4))
         ax.imshow(
             density[::-1,:],
@@ -236,46 +238,6 @@ def loc_density_from_file(
         out_png = out_png,
     )
 
-def overlay_locs_interactive(
-    locs,
-    nd2_file,
-    vmax_mod = 0.5,
-    dpi = 20,
-    continuous_update = False,
-):
-    # Load the ND2 file
-    reader = spazio.ImageFileReader(nd2_file)
-    N, M, n_frames = reader.get_shape()
-
-    # Figure out the intensity scaling
-    stack_min, stack_max = reader.min_max()
-    vmin = stack_min
-    vmax = stack_max * vmax_mod
-
-    # Define the update function
-    def update(frame_idx):
-        fig, ax = plt.subplots(figsize = (8, 8))
-        ax.imshow(
-            reader.get_frame(frame_idx),
-            cmap = 'gray',
-            vmin = vmin,
-            vmax = vmax,
-        )
-        ax.plot(
-            locs.loc[locs['frame_idx'] == frame_idx]['x_pixels'] - 0.5,
-            locs.loc[locs['frame_idx'] == frame_idx]['y_pixels'] - 0.5,
-            marker = '.',
-            markersize = 15,
-            color = 'r',
-            linestyle = '',
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        plt.show(); plt.close()
-
-    interact(update, frame_idx = widgets.IntSlider(
-        min=0, max=n_frames, continuous_update=continuous_update))
-
 def overlay_trajs(
     nd2_file,
     tracked_mat_file,
@@ -331,7 +293,7 @@ def overlay_trajs(
     # Do the plotting
     colors = generate_rainbow_palette()
 
-    result = np.zeros((n_frames_plot, N_up, M_up * 2, 4), dtype = 'uint8')
+    result = np.zeros((n_frames_plot, N_up, M_up * 2 + upsampling_factor, 4), dtype = 'uint8')
     frame_exp = np.zeros((N_up, M_up), dtype = 'uint8')
     for frame_idx in tqdm(range(n_frames_plot)):
         frame = reader.get_frame(frame_idx + start_frame).astype('float64')
@@ -344,29 +306,31 @@ def overlay_trajs(
                 frame_exp[i::upsampling_factor, j::upsampling_factor] = frame_8bit
 
         result[frame_idx, :, :M_up, 3] = frame_exp.copy()
-        result[frame_idx, :, M_up:, 3] = frame_exp.copy()
+        result[frame_idx, :, M_up + upsampling_factor:, 3] = frame_exp.copy()
+
+        result[frame_idx, :, M_up:M_up+upsampling_factor, :] = 255
 
         for j in range(3):
             result[frame_idx, :, :M_up, j] = frame_exp.copy()
-            result[frame_idx, :, M_up + 1:, j] = frame_exp.copy()
+            result[frame_idx, :, M_up + upsampling_factor:, j] = frame_exp.copy()
 
         locs_in_frame = locs[(locs[:,0] == frame_idx + start_frame).astype('bool'), :]
 
         for loc_idx in range(locs_in_frame.shape[0]):
             try:
-                result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3], :] = \
+                result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
                     colors[locs_in_frame[loc_idx, 4], :]
             except (KeyError, ValueError, IndexError) as e2: #edge loc
                 pass
             for j in range(1, crosshair_len + 1):
                 try:
-                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + j, :] = \
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + j + upsampling_factor, :] = \
                         colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] - j, :] = \
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] - j + upsampling_factor, :] = \
                         colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2] + j, M_up + locs_in_frame[loc_idx, 3], :] = \
+                    result[frame_idx, locs_in_frame[loc_idx, 2] + j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
                         colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2] - j, M_up + locs_in_frame[loc_idx, 3], :] = \
+                    result[frame_idx, locs_in_frame[loc_idx, 2] - j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
                         colors[locs_in_frame[loc_idx, 4], :]
                 except (KeyError, ValueError, IndexError) as e3:  #edge loc 
                     continue 
@@ -376,6 +340,10 @@ def overlay_trajs(
 
     tifffile.imsave(out_tif, result)
     reader.close()
+
+#
+# Interactive functions -- for Jupyter notebooks
+#
 
 def overlay_trajs_interactive(
     nd2_file,
@@ -403,6 +371,7 @@ def overlay_trajs_interactive(
 
     reader = tifffile.TiffFile(out_tif)
     n_frames = len(reader.pages)
+    
     def update(frame_idx):
         fig, ax = plt.subplots(figsize = (14, 7))
         page = reader.pages[frame_idx].asarray()
@@ -412,11 +381,217 @@ def overlay_trajs_interactive(
         )
         ax.set_xticks([])
         ax.set_yticks([])
+        for spine_dir in ['top', 'bottom', 'left', 'bottom']:
+            ax.spines[spine_dir].set_visible(False)
         plt.show(); plt.close()
 
     interact(update, frame_idx = widgets.IntSlider(
         min=0, max=n_frames, continuous_update=continuous_update))
-    
+
+def overlay_locs_interactive(
+    locs,
+    nd2_file,
+    vmax_mod = 0.5,
+    dpi = 20,
+    continuous_update = False,
+):
+    # Load the ND2 file
+    reader = spazio.ImageFileReader(nd2_file)
+    N, M, n_frames = reader.get_shape()
+
+    # Figure out the intensity scaling
+    stack_min, stack_max = reader.min_max()
+    vmin = stack_min
+    vmax = stack_max * vmax_mod
+
+    # Define the update function
+    def update(frame_idx):
+        fig, ax = plt.subplots(figsize = (8, 8))
+        ax.imshow(
+            reader.get_frame(frame_idx),
+            cmap = 'gray',
+            vmin = vmin,
+            vmax = vmax,
+        )
+        ax.plot(
+            locs.loc[locs['frame_idx'] == frame_idx]['x_pixels'] - 0.5,
+            locs.loc[locs['frame_idx'] == frame_idx]['y_pixels'] - 0.5,
+            marker = '.',
+            markersize = 15,
+            color = 'r',
+            linestyle = '',
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.show(); plt.close()
+
+    interact(update, frame_idx = widgets.IntSlider(
+        min=0, max=n_frames, continuous_update=continuous_update))
+
+def optimize_detection_interactive(
+    image_file,
+    offset_by_half = False,
+):
+    reader = spazio.ImageFileReader(image_file)
+    N, M, n_frames = reader.get_shape()
+
+    def update(frame_idx, sigma, detect_threshold, window_size):
+        image = reader.get_frame(frame_idx)
+        LL, detections, peaks, detect_positions = localize._detect_gaussian_kernel(
+            image,
+            sigma = sigma,
+            detect_threshold = detect_threshold,
+            window_size = window_size,
+            offset_by_half = offset_by_half,
+        )
+
+        plot_image = image.copy()
+        im_max = plot_image.max()
+        for pos_idx in range(detect_positions.shape[0]):
+            y, x = detect_positions[pos_idx, :].astype('uint16') + 1
+            for i in range(-2, 3):
+                try:
+                    plot_image[y+i,x] = im_max 
+                except IndexError:
+                    pass
+                try:
+                    plot_image[y,x+i] = im_max 
+                except IndexError:
+                    pass 
+
+        fig, ax = plt.subplots(2, 2, figsize = (16, 16))
+        ax[0,0].imshow(
+            image, cmap = 'gray'
+        )
+        ax[0,1].imshow(
+            LL, cmap = 'gray',
+        )
+        ax[1,0].imshow(
+            detections, cmap = 'gray',
+        )
+        ax[1,1].imshow(
+            plot_image, cmap = 'gray',
+        )
+        for i in range(2):
+            for j in range(2):
+                ax[i,j].set_xticks([])
+                ax[i,j].set_yticks([])
+        ax[0,0].set_title('Original', fontdict = {'fontsize' : 30})
+        ax[0,1].set_title('Log-likelihood map', fontdict = {'fontsize' : 30})
+        ax[1,0].set_title('LLR > threshold', fontdict = {'fontsize' : 30})
+        ax[1,1].set_title('Detections', fontdict = {'fontsize' : 30})
+
+        plt.show(); plt.close()
+
+    interact(
+        update,
+        frame_idx = widgets.IntSlider(min = 0, max = n_frames, continuous_update = False),
+        sigma = widgets.FloatSlider(min = 0.4, max = 3.0, continuous_update = False),
+        detect_threshold = widgets.FloatSlider(min = 10.0, max = 30.0, continuous_update = False),
+        window_size = widgets.IntSlider(min = 3, max = 21, step = 2, continuous_update = False),
+    )
+
+def optimize_detection_dog_interactive(
+    image_file,
+):
+    reader = spazio.ImageFileReader(image_file)
+    N, M, n_frames = reader.get_shape()
+
+    def update(
+        frame_idx,
+        bg_kernel_width = 10,
+        bg_sub_mag = 1.0,
+        spot_kernel_width = 1.0,
+        threshold = 10000.0,
+    ):
+        image = reader.get_frame(frame_idx)
+        image_bg, image_bg_sub, image_filt, detections, peaks, detect_positions = \
+            localize._detect_dog_filter(
+                image,
+                bg_kernel_width = bg_kernel_width,
+                bg_sub_mag = bg_sub_mag,
+                spot_kernel_width = spot_kernel_width,
+                threshold = threshold,
+            )
+
+        fig, ax = plt.subplots(2, 2, figsize = (16, 16))
+        ax[0,0].imshow(image, cmap = 'gray')
+        ax[0,1].imshow(image_bg, cmap = 'gray')
+        ax[1,0].imshow(image_filt, cmap = 'gray')
+        ax[1,1].imshow(detections, cmap = 'gray')
+
+        plt.show(); plt.close()
+
+    interact(
+        update,
+        frame_idx = widgets.IntSlider(value = 0, min = 0, max = n_frames-1, continuous_update = False),
+        bg_kernel_width = widgets.IntSlider(value = 10, min = 1, max = 20, continuous_update = False),
+        bg_sub_mag = widgets.FloatSlider(value = 1.0, min = 0.0, max = 2.0, continuous_update = False),
+        spot_kernel_width = widgets.FloatSlider(value = 1.0, min = 0.2, max = 2.0, continuous_update = False),
+        threshold = widgets.FloatSlider(value = 3000, min = 100.0, max = 10000.0, continuous_update = False),
+    )
+
+def optimize_detection_log_interactive(
+    image_file,
+):
+    reader = spazio.ImageFileReader(image_file)
+    N, M, n_frames = reader.get_shape()
+
+    def update(
+        frame_idx,
+        bg_kernel_width = 10,
+        bg_sub_mag = 1.0,
+        spot_kernel_width = 2.0,
+        threshold = 10000.0,
+    ):
+        image = reader.get_frame(frame_idx)
+        image_filt, detections, peaks, detect_positions = \
+            localize._detect_log_filter(
+                image,
+                bg_kernel_width = bg_kernel_width,
+                bg_sub_mag = bg_sub_mag,
+                spot_kernel_width = spot_kernel_width,
+                threshold = threshold,
+            )
+
+        plot_image = image.copy()
+        image_max = plot_image.max()
+        for detect_idx in range(detect_positions.shape[0]):
+            y, x = detect_positions[detect_idx, :].astype('uint16')
+            for i in range(-2, 3):
+                try:
+                    plot_image[y+i, x] = image_max
+                except IndexError:
+                    pass
+                try:
+                    plot_image[y, x+i] = image_max 
+                except IndexError:
+                    pass 
+
+        fig, ax = plt.subplots(2, 2, figsize = (16, 16))
+        ax[0,0].imshow(image, cmap = 'gray')
+        ax[0,1].imshow(image_filt, cmap = 'gray')
+        ax[1,0].imshow(detections, cmap = 'gray')
+        ax[1,1].imshow(plot_image, cmap = 'gray')
+
+        plt.show(); plt.close()
+
+    interact(
+        update,
+        frame_idx = widgets.IntSlider(value = 0, min = 0, max = n_frames-1, continuous_update = False),
+        bg_kernel_width = widgets.IntSlider(value = 10, min = 1, max = 20, continuous_update = False),
+        bg_sub_mag = widgets.FloatSlider(value = 1.0, min = 0.0, max = 2.0, continuous_update = False),
+        spot_kernel_width = widgets.FloatSlider(value = 2.0, min = 0.5, max = 5.0, continuous_update = False),
+        threshold = widgets.FloatSlider(value = 100, min = 0.1, max = 1000.0, continuous_update = False),
+    )
+
+
+
+
+# 
+# Plotting utilities
+#
+
 
 def generate_rainbow_palette(n_colors = 256):
     '''

@@ -8,6 +8,7 @@ from glob import glob
 import numpy as np
 
 # For convolutions in the detection step
+import scipy.ndimage as ndi 
 from scipy.ndimage import uniform_filter
 
 # Quick erfs for the PSF definition
@@ -125,7 +126,7 @@ def detect_and_localize_file(
     file_name,
     sigma = 1.0,
     out_txt = None,
-    out_dir = None,
+    save = True,
     window_size = 9,
     detect_threshold = 20.0,
     damp = 0.2,
@@ -149,10 +150,12 @@ def detect_and_localize_file(
         
         sigma: float, the expected standard deviation of the Gaussian spot
 
-        out_txt: str, the name of a file to save the localizations, if desired
+        out_txt: str, the name of a file to save the localizations, if desired.
+            If a file path, will save the results to that file.
+            If a directory, will save output files in that directory.
+            If None, autogenerates the output file name.
 
-        out_dir: str, location to put output files. If None, these are placed
-            in the same directory as the ND2 files
+        save: bool, save output to file
         
         window_size: int, the width of the window to use for spot detection
             and localization
@@ -205,10 +208,6 @@ def detect_and_localize_file(
     gc = g - g.mean() 
     gaussian_kernel = utils.expand_window(gc, N, M)
     gc_rft = np.fft.rfft2(gaussian_kernel)
-    uniform_kernel = utils.expand_window(
-        np.ones((window_size, window_size)),
-        N, M,
-    )
 
     # Compute some required normalization factors for spot detection
     n_pixels = window_size ** 2
@@ -526,14 +525,28 @@ def detect_and_localize_file(
     }
 
     # If desired, save to a file
-    if out_txt != None:
-        if out_dir != None:
-            if not os.path.isdir(out_dir):
-                os.mkdir(out_dir)
-            out_txt = "%s/%s" % (out_dir, out_txt)
+    if save:
+        if type(out_txt) == type(''):
+            if '/' in out_txt:
+                out_prefix = '/'.join(out_txt.split('/')[:-1])
+            else:
+                out_prefix = './'
+            if not os.path.isdir(out_prefix):
+                raise RuntimeError('detect_and_localize_file: could not find out_txt directory %s' % out_prefix)
+        else:
+            if '.nd2' in file_name:
+                _out_f = '%s.locs' % file_name.replace('.nd2', '')
+            elif '.tif' in file_name:
+                _out_f = '%s.locs' % file_name.replace('.tif', '')
+            elif '.tiff' in file_name:
+                _out_f = '%s.locs' % file_name.replace('.tiff', '')
+            if type(out_txt) == type('') and os.path.isdir(out_txt):
+                out_txt = '%s/%s' % (out_txt, _out_f)
+            else:
+                out_txt = _out_f
         spazio.save_locs(out_txt, df_locs, metadata)
 
-    return df_locs
+    return df_locs, metadata 
 
 def detect_and_localize_file_parallelized(
     file_name,
@@ -644,7 +657,6 @@ def detect_and_localize_directory(
             fname,
             sigma = sigma,
             out_txt = out_txt_list[f_idx],
-            out_dir = None,
             window_size = window_size,
             detect_threshold = detect_threshold,
             damp = damp,
@@ -658,6 +670,181 @@ def detect_and_localize_directory(
             enforce_negative_definite = enforce_negative_definite,
             verbose = verbose,
         )
+
+# 
+# More customized particle detection functions
+#
+
+def _detect_with_psf_kernel(
+    image,
+    psf_kernel_rft,
+    Sgc2,
+    detect_threshold = 20.0,
+    window_size = 9,
+):
+    '''
+    Run detection with a custom PSF kernel. Takes the FT
+    of the kernel rather than the kernel itself to avoid
+    having to take the FT at each iteration.
+
+    args
+        image           :   2D ndarray, real image
+
+        psf_kernel_rft  :   2D ndarray of type complex128,
+                            the real Fourier transform of the
+                            PSF kernel
+
+        Sgc2            :   float, the sum of squares for the
+                            real PSF kernel
+
+        detect_threshold:   float
+
+        window_size     :   int
+
+    returns
+        2D ndarray, the y and x coordinates of each detection
+
+    '''
+    # Take the Fourier transform of the image
+    image = image.astype('float64')
+    image_rft = np.fft.rfft2(image)
+
+    # Make sure the shapes of the FTs match
+    assert (image_rft.shape == psf_kernel_rft.shape)
+
+    # Take the convolutions necessary for detection
+    n_pixels = window_size ** 2
+    half_w = window_size // 2
+    A = uniform_filter(image, window_size) * n_pixels
+    B = uniform_filter(image**2, window_size) * n_pixels
+    C = np.fft.ifftshift(np.fft.irfft2(image_rft * psf_kernel_rft))
+
+    # Take likelihood ratio for presence of a spot
+    L = 1 - (C**2) / (Sgc2*(B - (A**2)/float(n_pixels)))
+    L[:half_w,:] = 1.0
+    L[:,:half_w] = 1.0
+    L[-half_w:,:] = 1.0
+    L[:,-half_w:] = 1.0
+    L[L <= 0.0] = 0.001
+
+    # Take log-likelihood
+    LL = -(n_pixels / 2) * np.log(L)
+
+    # Find pixels that pass the detection threshold
+    detections = LL > detect_threshold
+
+    # For each detection that consists of adjacent pixels,
+    # take the local maximum
+    peaks = utils.local_max_2d(LL) & detections
+
+    # Find coordinates of detections
+    detected_positions = np.asarray(np.nonzero(peaks)).T 
+
+    return detected_positions 
+
+def _detect_gaussian_kernel(
+    image,
+    sigma = 1.0,
+    detect_threshold = 20.0,
+    window_size = 9,
+    offset_by_half = False,
+):
+    '''
+    Run detection with a Gaussian kernel of custom width.
+
+    args
+        image           :   2D ndarray, real image
+        sigma           :   float, width of Gaussian in pixels
+        detect_threshold:   float
+        window_size     :   int
+        offset_by_half  :   bool, offset the PSF kernel by 0.5
+                            pixels
+
+    returns
+        LL, detections, peaks, detected_positions
+
+
+    '''
+    # Take FT of the image
+    image = image.astype('float64')
+    N, M = image.shape 
+    image_rft = np.fft.rfft2(image)
+
+    # Make the PSF kernel
+    g = utils.gaussian_model(sigma, window_size, offset_by_half = offset_by_half)
+    gc = g - g.mean() 
+    gaussian_kernel = utils.expand_window(gc, N, M)
+    gc_rft = np.fft.rfft2(gaussian_kernel)
+
+    # Compute some factors
+    half_w = window_size // 2
+    n_pixels = window_size ** 2
+    Sgc2 = (gc ** 2).sum()
+
+    # Run the convolutions for detection
+    A = uniform_filter(image, window_size) * n_pixels
+    B = uniform_filter(image**2, window_size) * n_pixels
+    C = np.fft.ifftshift(np.fft.irfft2(image_rft * gc_rft))
+
+    # Take likelihood ratio for presence of a spot
+    L = 1 - (C**2) / (Sgc2*(B - (A**2)/float(n_pixels)))
+    L[:half_w,:] = 1.0
+    L[:,:half_w] = 1.0
+    L[-half_w:,:] = 1.0
+    L[:,-half_w:] = 1.0
+    L[L <= 0.0] = 0.001
+
+    # Take log-likelihood
+    LL = -(n_pixels / 2) * np.log(L)
+
+    # Find pixels that pass the detection threshold
+    detections = LL > detect_threshold
+
+    # For each detection that consists of adjacent pixels,
+    # take the local maximum
+    peaks = utils.local_max_2d(LL) & detections
+
+    # Find coordinates of detections
+    detected_positions = np.asarray(np.nonzero(peaks)).T 
+
+    return LL, detections, peaks, detected_positions 
+
+def _detect_dog_filter(
+    image,
+    bg_kernel_width = 10,
+    bg_sub_mag = 1.0,
+    spot_kernel_width = 1,
+    threshold = 20.0,
+):
+    image = image.astype('float64')
+    image_bg = ndi.gaussian_filter(image, bg_kernel_width)
+    image_bg_sub = image - image_bg * bg_sub_mag 
+    image_bg_sub[image_bg_sub < 0] = 0
+    image_filt = ndi.gaussian_filter(image_bg_sub, spot_kernel_width)
+    detections = image_filt > threshold
+    peaks = utils.local_max_2d(image) & detections 
+    detected_positions = np.asarray(np.nonzero(peaks)).T 
+
+    return image_bg, image_bg_sub, image_filt, detections, peaks, detected_positions 
+
+def _detect_log_filter(
+    image,
+    bg_kernel_width = 10,
+    bg_sub_mag = 1.0,
+    spot_kernel_width = 2.0,
+    threshold = 20.0,
+):
+    image = image.astype('float64')
+    image_bg = ndi.gaussian_filter(image, bg_kernel_width)
+    image_bg_sub = image - image_bg * bg_sub_mag 
+    image_bg_sub[image_bg_sub < 0] = 0
+    image_filt = -ndi.laplace(ndi.gaussian_filter(image_bg_sub, spot_kernel_width))
+    detections = image_filt > threshold
+    peaks = utils.local_max_2d(image) & detections 
+    detected_positions = np.asarray(np.nonzero(peaks)).T 
+
+    return image_filt, detections, peaks, detected_positions 
+
 
 
 
