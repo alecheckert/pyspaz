@@ -431,6 +431,7 @@ def overlay_locs_interactive(
 def optimize_detection_interactive(
     image_file,
     offset_by_half = False,
+    vmax_mod = 1.0,
 ):
     reader = spazio.ImageFileReader(image_file)
     N, M, n_frames = reader.get_shape()
@@ -461,7 +462,7 @@ def optimize_detection_interactive(
 
         fig, ax = plt.subplots(2, 2, figsize = (16, 16))
         ax[0,0].imshow(
-            image, cmap = 'gray'
+            image, cmap = 'gray', vmax = image.max() * vmax_mod 
         )
         ax[0,1].imshow(
             LL, cmap = 'gray',
@@ -470,7 +471,7 @@ def optimize_detection_interactive(
             detections, cmap = 'gray',
         )
         ax[1,1].imshow(
-            plot_image, cmap = 'gray',
+            plot_image, cmap = 'gray', vmax = image.max() * vmax_mod, 
         )
         for i in range(2):
             for j in range(2):
