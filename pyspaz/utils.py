@@ -356,4 +356,47 @@ def euclidean_distance(tuple_0, tuple_1):
     return np.sqrt(((np.array(tuple_0) - \
         np.array(tuple_1))**2).sum())
 
+def scale_to_uint16(image):
+    '''
+    Rescale an image so that its maximum pixel intensity
+    is equal to the maximum intensity that can be 
+    encoded by uint16 (e.g. 65535). Then convert to 
+    uint16.
+
+    '''
+    return (image.astype('float64') * 65535.0 / image.max()).astype('uint16')
+
+
+# 
+# Utilities for dealing with trajectories in pandas.DataFrame format
+#
+def get_traj_lens(trajs, index_column = 'traj_idx'):
+    '''
+    Return an ndarray of all trajectory lengths.
+
+    args
+        trajs       :   pandas.DataFrame
+
+    returns
+        1D ndarray
+
+    '''
+    return np.asarray([len(traj) for traj_idx, traj in trajs.groupby(index_columns)])
+
+def assign_traj_lens(trajs, index_column = 'traj_idx'):
+    '''
+    Add a `traj_len` column to a set of trajectories in 
+    pandas.DataFrame format.
+
+    '''
+    traj_len_dict = {traj_idx : len(traj) for traj_idx, traj in trajs.groupby(index_column)}
+    trajs['traj_len'] = trajs[index_column].apply(lambda x: traj_len_dict.get(x))
+
+
+
+
+
+
+
+
 

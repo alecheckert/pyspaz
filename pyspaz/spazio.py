@@ -60,7 +60,7 @@ def load_locs(locs_file):
         line = f.readline().replace('\n', '')
         while line != 'METADATA_END':
             key, value = line.split('\t')
-            metadata[key] = value
+            metadata[key] = try_numeric_convert(value)
             line = f.readline().replace('\n', '')
         locs = pd.read_csv(f, sep = '\t')
     return locs, metadata 
@@ -86,10 +86,10 @@ def save_trajs(tracked_mat_file, trajs, metadata, traj_cols = None):
         out_dict['traj_cols'] = traj_cols
     sio.savemat(tracked_mat_file, out_dict)
 
-def load_trajs(tracked_mat_file, unpack_cols = True):
+def load_trajs(filename, unpack_cols = True):
     '''
     args
-        tracked_mat_file    :   str
+        filename            :   str, either *Tracked.mat or *.csv
         unpack_cols         :   bool, may need to be changed to 
                                 False for MATLAB trajectories
 
@@ -101,33 +101,41 @@ def load_trajs(tracked_mat_file, unpack_cols = True):
         )
 
     '''
-    check_file_exists(tracked_mat_file)
+    check_file_exists(filename)
 
-    in_dict = sio.loadmat(tracked_mat_file)
-    keys = [str(i) for i in list(in_dict.keys())]
-    if 'metadata' in keys:
-        metadata = format_metadata_in(in_dict['metadata'])
+    if 'Tracked.mat' in filename:
+        in_dict = sio.loadmat(filename)
+        keys = [str(i) for i in list(in_dict.keys())]
+        if 'metadata' in keys:
+            metadata = format_metadata_in(in_dict['metadata'])
+        else:
+            metadata = {}
+        if 'traj_cols' in keys:
+            traj_cols = [trim_end_str(i) for i in in_dict['traj_cols']]
+        else:
+            traj_cols = []
+        trajs = in_dict['trackedPar']
+
+        # Correct for indexing error, if originates from MATLAB
+        if trajs.shape[0] == 1:
+            trajs = trajs[0,:]
+
+        # Unpack the columns for single-value attributes
+        if unpack_cols:
+            n_cols = len(trajs[0])
+            n_trajs = len(trajs)
+            for col_idx in range(1, n_cols):
+                for traj_idx in range(n_trajs):
+                    trajs[traj_idx][col_idx] = trajs[traj_idx][col_idx][0]
+
+        return trajs, metadata, traj_cols
+
+    elif '.txt' in filename or '.trajs' in filename:
+        df, metadata = load_locs(filename)
+        return df, metadata, df.columns
+
     else:
-        metadata = {}
-    if 'traj_cols' in keys:
-        traj_cols = [trim_end_str(i) for i in in_dict['traj_cols']]
-    else:
-        traj_cols = []
-    trajs = in_dict['trackedPar']
-
-    # Correct for indexing error, if originates from MATLAB
-    if trajs.shape[0] == 1:
-        trajs = trajs[0,:]
-
-    # Unpack the columns for single-value attributes
-    if unpack_cols:
-        n_cols = len(trajs[0])
-        n_trajs = len(trajs)
-        for col_idx in range(1, n_cols):
-            for traj_idx in range(n_trajs):
-                trajs[traj_idx][col_idx] = trajs[traj_idx][col_idx][0]
-
-    return trajs, metadata, traj_cols
+        raise RuntimeError('spazio.load_trajs: input file must be either *Tracked.mat or *.txt/*.trajs')
 
 def save_trajectory_obj_to_mat(
     mat_file_name,
@@ -167,8 +175,11 @@ def save_trajectory_obj_to_mat(
             trajectory.mle_I0,
             trajectory.mle_bg,
             trajectory.llr_detect,
+            [trajectory.subproblem_shapes[i][0] for i in range(len(trajectory.subproblem_shapes))],
+            [trajectory.subproblem_shapes[i][1] for i in range(len(trajectory.subproblem_shapes))],
         ])
-    traj_cols = ['position', 'frame_idx', 'time', 'I0', 'bg', 'llr_detect']
+    traj_cols = ['position', 'frame_idx', 'time', 'I0', 'bg', 
+        'llr_detect', 'subproblem_n_traj', 'subproblem_n_loc']
     out_dict = {
         'trackedPar' : result_list,
         'metadata' : format_metadata_out(metadata),
@@ -177,6 +188,42 @@ def save_trajectory_obj_to_mat(
 
     sio.savemat(mat_file_name, out_dict)
     return out_dict  
+
+def save_trajectory_obj_to_txt(
+    csv_file_name,
+    trajectories,
+    metadata,
+    frame_interval_sec,
+    pixel_size_um = 0.16,
+):
+    n_trajs = len(trajectories)
+    n_locs = sum([len(traj.positions) for traj in trajectories])
+    result = np.zeros((n_locs, 10), dtype = 'float64')
+    c_idx = 0
+    for traj_idx, trajectory in enumerate(trajectories):
+        traj_len = trajectory.positions.shape[0]
+        result[c_idx:c_idx+traj_len, :2] = trajectory.positions.copy()
+        result[c_idx:c_idx+traj_len, 2] = trajectory.frames 
+        result[c_idx:c_idx+traj_len, 3] = np.array(trajectory.frames) * frame_interval_sec
+        result[c_idx:c_idx+traj_len, 4] = trajectory.mle_I0
+        result[c_idx:c_idx+traj_len, 5] = trajectory.mle_bg
+        result[c_idx:c_idx+traj_len, 6] = trajectory.llr_detect 
+        result[c_idx:c_idx+traj_len, 7] = [trajectory.subproblem_shapes[i][0] for i in range(len(trajectory.subproblem_shapes))]
+        result[c_idx:c_idx+traj_len, 8] = [trajectory.subproblem_shapes[i][1] for i in range(len(trajectory.subproblem_shapes))]
+        result[c_idx:c_idx+traj_len, 9] = traj_idx 
+        c_idx += traj_len 
+        
+    result_df = pd.DataFrame(result, columns = [
+        'y_pixels', 'x_pixels', 'frame_idx', 'time', 'I0', 'bg', 
+        'llr_detect', 'subproblem_n_traj', 'subproblem_n_loc',
+        'traj_idx',
+    ])
+    result_df['frame_idx'] = result_df['frame_idx'].astype('uint32')
+    result_df['traj_idx'] = result_df['traj_idx'].astype('uint32')
+    result_df['subproblem_n_traj'] = result_df['subproblem_n_traj'].astype('uint16')
+    result_df['subproblem_n_loc'] = result_df['subproblem_n_traj'].astype('uint16')
+
+    save_locs(csv_file_name, result_df, metadata)
 
 def trajs_to_locs(trajs, traj_cols, units = 'um'):
     '''
@@ -221,6 +268,18 @@ def trajs_to_locs(trajs, traj_cols, units = 'um'):
     df['traj_idx'] = df['traj_idx'].astype('int64')
     return df
 
+def locs_to_trajs(locs, traj_col = 'traj_idx'):
+    '''
+    Convert a set of trajectories in pandas.DataFrame format
+    into trajectories in *Tracked.mat format.
+
+    '''
+    if traj_col not in locs.columns:
+        raise RuntimeError('spazio.locs_to_trajs: input dataframe must contain the traj_col %s' % traj_col)
+
+    n_trajs = locs[traj_col].max() + 1
+    for traj_idx, traj in locs.groupby(traj_col):
+        raise NotImplementedError
 
 def extract_positions_from_trajs(trajs):
     '''
@@ -236,7 +295,7 @@ def extract_positions_from_trajs(trajs):
 
     '''
     n_trajs = trajs.shape[0]
-    n_locs = sum([trajs[traj_idx][0].shape[0] for traj_idx in range(N_trajs)])
+    n_locs = sum([trajs[traj_idx][0].shape[0] for traj_idx in range(n_trajs)])
     positions = np.zeros((n_locs, 2))
     loc_idx = 0
     for traj_idx in range(n_trajs):
@@ -383,7 +442,6 @@ def format_metadata_in(metadata_tuple_list):
     for k, v in metadata_tuple_list:
         out[trim_end_str(k)] = try_numeric_convert(trim_end_str(v))
     return out 
-
 
 
 

@@ -122,6 +122,396 @@ def radial_symmetry(psf_image):
 
     return fit_vector 
 
+def detect_frame(
+    image,
+    sigma = 1.0,
+    window_size = 9,
+    detect_threshold = 20.0,
+    plot = False,
+):
+    image = image.astype('float64')
+    N, M = image.shape 
+    half_w = window_size // 2
+
+    # Compute the kernels for spot detection
+    g = utils.gaussian_model(sigma, window_size)
+    gc = g - g.mean() 
+    gaussian_kernel = utils.expand_window(gc, N, M)
+    gc_rft = np.fft.rfft2(gaussian_kernel)
+
+    # Compute some required normalization factors for spot detection
+    n_pixels = window_size ** 2
+    Sgc2 = (gc ** 2).sum()
+
+   # Perform the convolutions required for the LL detection test
+    A = uniform_filter(image, window_size) * n_pixels
+    B = uniform_filter(image**2, window_size) * n_pixels
+    im_rft = np.fft.rfft2(image)
+    C = np.fft.ifftshift(np.fft.irfft2(im_rft * gc_rft))
+
+    # Calculate the likelihood of a spot in each pixel,
+    # and set bad values to 1.0 (i.e. no chance of detection)
+    L = 1 - (C**2) / (Sgc2*(B - (A**2)/float(n_pixels)))
+    L[:half_w,:] = 1.0
+    L[:,:half_w] = 1.0
+    L[-(1+half_w):,:] = 1.0
+    L[:,-(1+half_w):] = 1.0
+    L[L <= 0.0] = 0.001
+
+    # Calculate log likelihood of the presence of a spot
+    LL = -(n_pixels / 2) * np.log(L)
+
+    # Find pixels that pass the detection threshold
+    detections = LL > detect_threshold 
+
+    # For each detection that consists of adjacent pixels,
+    # take the local maximum
+    peaks = utils.local_max_2d(LL) & detections
+
+    # Find the coordinates of the detections
+    detected_positions = np.asarray(np.nonzero(peaks)).T + 1
+    
+    # Copy the detection information to the result array
+    n_detect = detected_positions.shape[0]
+    result = np.zeros((n_detect, 3), dtype = 'float64')
+    result[:, :2] = detected_positions.copy()
+    result[:, 2] = LL[np.nonzero(peaks)]
+
+    if plot:
+        fig, ax = plt.subplots(2, 3, figsize = (9, 6))
+        ax[0,0].imshow(image, cmap = 'gray')
+        ax[0,1].imshow(C, cmap = 'gray')
+        ax[0,2].imshow(LL, cmap = 'gray')
+        ax[1,0].imshow(detections, cmap = 'gray')
+        ax[1,1].imshow(peaks, cmap = 'gray')
+        plot_image = image.copy()
+        for detect_idx in range(n_detect):
+            y, x = detected_positions[detect_idx, :]
+            for i in range(-2, 3):
+                plot_image[y+i,x] = plot_image.max()
+                plot_image[y,x+i] = plot_image.max()
+        ax[1,2].imshow(plot_image, cmap = 'gray')
+
+        ax[0,0].set_title('Original')
+        ax[0,1].set_title('Conv kernel')
+        ax[0,2].set_title('Log likelihood of spot')
+        ax[1,0].set_title('> threshold')
+        ax[1,1].set_title('Peaks')
+        ax[1,2].set_title('Original + detections')
+        plt.show(); plt.close()
+
+    return result 
+
+def localize_frame(
+    image,
+    sigma = 1.0,
+    window_size = 9,
+    detect_threshold = 20.0,
+    plot_detect = False,
+    plot_localize = False,
+    camera_bg = 470,
+    camera_gain = 110,
+    initial_guess = 'radial_symmetry',
+    max_iter = 20,
+    convergence_crit = 1.0e-4,
+    divergence_crit = 1000.0,
+    enforce_negative_definite = False,
+    damp = 0.2,
+    calculate_error = False,
+):
+    image = image.astype('float64')
+
+    ## Run spot detection 
+    detected_positions = detect_frame(
+        image,
+        sigma = sigma,
+        window_size = window_size, 
+        detect_threshold = detect_threshold,
+        plot = plot_detect,
+    )
+    n_detect = detected_positions.shape[0]
+
+    ## Run subpixel localization
+    # Precompute some required factors for localization
+    n_pixels = window_size ** 2
+    half_w = window_size // 2
+    y_field, x_field = np.mgrid[:window_size, :window_size]
+    sig2_2 = 2 * (sigma ** 2)
+    sqrt_sig2_2 = np.sqrt(sig2_2)
+    sig2_pi_2 = np.pi * sig2_2
+    sqrt_sig2_pi_2 = np.sqrt(sig2_pi_2)
+    
+    # Initialize the vector of PSF model parameters. We'll
+    # always use the following index scheme:
+    #    pars[0]: y center of the PSF
+    #    pars[1]: x center of the PSF
+    #    pars[2]: I0, the number of photons in the PSF
+    #    pars[3]: Ibg, the number of BG photons per pixel
+    init_pars = np.zeros(4, dtype = 'float64')
+    pars = np.zeros(4, dtype = 'float64')
+    
+    # Gradient of the log-likelihood w/ respect to each of the four parameters
+    grad = np.zeros(4, dtype = 'float64')
+    
+    # Hessian of the log-likelihood
+    H = np.zeros((4, 4), dtype = 'float64')
+    
+    # Store the results of localization in a large numpy.array. 
+    locs = np.zeros((n_detect, 10), dtype = 'float64')
+
+    # Keep track of information about each localization in a result
+    # array.
+    if calculate_error:
+        result = np.zeros((n_detect, 14), dtype = 'float64')
+    else:
+        result = np.zeros((n_detect, 10), dtype = 'float64')
+    result[:,:3] = detected_positions.copy()
+
+    if plot_localize:
+        q = np.sqrt(n_detect)
+        if q % 1.0 == 0.0:
+            q = int(q)
+        else:
+            q = int(np.ceil(q))
+        fig, ax = plt.subplots(q, q, figsize = (6, 6))
+
+    for d_idx in range(n_detect):
+
+       # Get a small subwindow surrounding that detection
+        detect_y = int(detected_positions[d_idx, 0])
+        detect_x = int(detected_positions[d_idx, 1])
+        psf_image = (image[
+            detect_y - half_w : detect_y + half_w + 1,
+            detect_x - half_w : detect_x + half_w + 1
+        ] - camera_bg) / camera_gain
+        psf_image[psf_image < 0.0] = 0.0
+    
+        # If the image is not square (edge detection), set the error
+        # column to True and move on
+        if psf_image.shape[0] != psf_image.shape[1]:
+            result[d_idx, 7] = True 
+            continue
+
+        # Make the initial parameter guesses.
+
+        # Guess by radial symmetry (usually the best)
+        if initial_guess == 'radial_symmetry':
+            init_pars[0], init_pars[1] = radial_symmetry(psf_image)
+            init_pars[3] = np.array([
+                psf_image[0,:-1].mean(),
+                psf_image[-1,1:].mean(),
+                psf_image[1:,0].mean(),
+                psf_image[:-1,-1].mean()
+            ]).mean()
+
+        # Guess by centroid method
+        elif initial_guess == 'centroid':
+            init_pars[0] = (y_field * psf_image).sum() / psf_image.sum()
+            init_pars[1] = (x_field * psf_image).sum() / psf_image.sum()
+            init_pars[3] = np.array([
+                psf_image[0,:-1].mean(),
+                psf_image[-1,1:].mean(),
+                psf_image[1:,0].mean(),
+                psf_image[:-1,-1].mean()
+            ]).mean()
+
+        # Simply place the guess in the center of the window
+        elif initial_guess == 'window_center':
+            init_pars[0] = window_size / 2
+            init_pars[1] = window_size / 2
+            init_pars[3] = psf_image.min()
+
+        # Other initial guess methods are not implemented
+        else:
+            raise NotImplementedError
+
+        # Use the model specification to guess I0
+        max_idx = np.argmax(psf_image)
+        max_y_idx = max_idx // window_size
+        max_x_idx = max_idx % window_size 
+        init_pars[2] = psf_image[max_y_idx, max_x_idx] - init_pars[3]
+        E_y_max = 0.5 * (erf((max_y_idx + 0.5 - init_pars[0]) / sqrt_sig2_2) - \
+                erf((max_y_idx - 0.5 - init_pars[0]) / sqrt_sig2_2))
+        E_x_max = 0.5 * (erf((max_x_idx + 0.5 - init_pars[1]) / sqrt_sig2_2) - \
+                erf((max_x_idx - 0.5 - init_pars[1]) / sqrt_sig2_2))
+        init_pars[2] = init_pars[2] / (E_y_max * E_x_max)
+
+        # If the I0 guess looks crazy (usually because there's a bright pixel
+        # on the edge), make a more conservative guess by integrating the
+        # inner ring of pixels
+        if (np.abs(init_pars[2]) > 1000) or (init_pars[2] < 0.0):
+            init_pars[2] = psf_image[half_w-1:half_w+2, half_w-1:half_w+2].sum()
+
+        # Set the current parameter set to the initial guess. Hold onto the
+        # initial guess so that if MLE diverges, we have a fall-back.
+        pars[:] = init_pars.copy()
+
+        # Keep track of the current number of iterations. When this exceeds
+        # *max_iter*, then the iteration is terminated.
+        iter_idx = 0
+
+        # Continue iterating until the maximum number of iterations is reached, or
+        # if the convergence criterion is reached
+        update = np.ones(4, dtype = 'float64')
+        while (iter_idx < max_iter) and any(np.abs(update[:2]) > convergence_crit):
+
+            #Calculate the PSF model under the current parameter set
+            E_y = 0.5 * (erf((y_field+0.5-pars[0])/sqrt_sig2_2) - \
+                erf((y_field-0.5-pars[0])/sqrt_sig2_2))
+            E_x = 0.5 * (erf((x_field+0.5-pars[1])/sqrt_sig2_2) - \
+                erf((x_field-0.5-pars[1])/sqrt_sig2_2))
+            model = pars[2] * E_y * E_x + pars[3]
+
+            # Avoid divide-by-zero errors
+            nonzero = (model > 0.0)
+
+            # Calculate the derivatives of the model with respect
+            # to each of the four parameters
+            du_dy = ((pars[2] / (2 * sqrt_sig2_pi_2)) * (
+                np.exp(-(y_field-0.5-pars[0])**2 / sig2_2) - \
+                np.exp(-(y_field+0.5-pars[0])**2 / sig2_2)
+            )) * E_x
+            du_dx = ((pars[2] / (2 * sqrt_sig2_pi_2)) * (
+                np.exp(-(x_field-0.5-pars[1])**2 / sig2_2) - \
+                np.exp(-(x_field+0.5-pars[1])**2 / sig2_2)
+            )) * E_y 
+            du_dI0 = E_y * E_x 
+            du_dbg = np.ones((window_size, window_size), dtype = 'float64')
+
+            # Determine the gradient of the log-likelihood at the current parameter vector.
+            # See the common structure of this term in section (1) of this notebook.
+            J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
+            grad[0] = (du_dy[nonzero] * J_factor).sum()
+            grad[1] = (du_dx[nonzero] * J_factor).sum()
+            grad[2] = (du_dI0[nonzero] * J_factor).sum()
+            grad[3] = (du_dbg[nonzero] * J_factor).sum()
+
+            # Determine the Hessian. See the common structure of these terms
+            # in section (1) of this notebook.
+            H_factor = psf_image[nonzero] / (model[nonzero]**2)
+            H[0,0] = (-H_factor * du_dy[nonzero]**2).sum()
+            H[0,1] = (-H_factor * du_dy[nonzero]*du_dx[nonzero]).sum()
+            H[0,2] = (-H_factor * du_dy[nonzero]*du_dI0[nonzero]).sum()
+            H[0,3] = (-H_factor * du_dy[nonzero]).sum()
+            H[1,1] = (-H_factor * du_dx[nonzero]**2).sum()
+            H[1,2] = (-H_factor * du_dx[nonzero]*du_dI0[nonzero]).sum()
+            H[1,3] = (-H_factor * du_dx[nonzero]).sum()
+            H[2,2] = (-H_factor * du_dI0[nonzero]**2).sum()
+            H[2,3] = (-H_factor * du_dI0[nonzero]).sum()
+            H[3,3] = (-H_factor).sum()
+
+            # Use symmetry to complete the Hessian.
+            H[1,0] = H[0,1]
+            H[2,0] = H[0,2]
+            H[3,0] = H[0,3]
+            H[2,1] = H[1,2]
+            H[3,1] = H[1,3]
+            H[3,2] = H[2,3]
+
+            # Invert the Hessian. Here, we may need to stabilize the Hessian by adding
+            # a ridge term. We'll increase this ridge as necessary until we can actually
+            # invert the matrix.
+            Y = np.diag([1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5])
+            if enforce_negative_definite:
+                while 1:
+                    try:
+                        pivots = get_pivots(H - Y)
+                        if (pivots > 0.0).any():
+                            Y *= 10
+                            continue
+                        else:
+                            H_inv = np.linalg.inv(H - Y)
+                            break
+                    except (ZeroDivisionError, np.linalg.linalg.LinAlgError):
+                        Y *= 10
+                        continue
+            else:
+                while 1:
+                    try:
+                        H_inv = np.linalg.inv(H - Y)
+                        break
+                    except (ZeroDivisionError, np.linalg.linalg.LinAlgError):
+                        Y *= 10
+                        continue
+
+            # Get the update vector, the change in parameters
+            update = -H_inv.dot(grad) * damp 
+
+            # Update the parameters
+            pars = pars + update 
+            iter_idx += 1
+
+        # If the estimate has diverged, fall back to the initial guess.
+        if any(np.abs(update[:2]) >= divergence_crit):
+            pars = init_pars
+        if  ~check_pos_inside_window(pars[:2], window_size, edge_tolerance = 2):
+            pars = init_pars
+        else:
+            # Correct for the half-pixel indexing error that results from
+            # implicitly assigning intensity values to the corners of pixels
+            # in the MLE method
+            pars[:2] = pars[:2] + 0.5
+
+        # Give the resulting y, x coordinates in terms of the whole image
+        pars[0] = pars[0] + detect_y - half_w
+        pars[1] = pars[1] + detect_x - half_w
+
+        # Save the parameter vector for this localization
+        result[d_idx, 3:7] = pars.copy()
+
+        # Save the image variance, which will become useful in the tracking
+        # step
+        result[d_idx, 8] = psf_image.var()
+
+        # Make an estimate for the error in the parameter estimation 
+        # by inverting the observed information matrix, acquired
+        # from the Jacobian
+        if calculate_error:
+
+            # The Jacobian is a 4-by-n_pixels matrix of the derivatives
+            # of each model parameter at each pixel
+            jac = np.array((du_dy, du_dx, du_dI0, du_dbg))
+            J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
+            _grad = (jac[:,nonzero] * J_factor).sum(1)
+            jac_div_sqrt_model = jac[:,nonzero] / np.sqrt(model[nonzero])
+
+            # Observed information matrix I
+            I = jac_div_sqrt_model.dot(jac_div_sqrt_model.T)
+            try:
+                err = np.diagonal(np.linalg.inv(I))
+            except np.linalg.LinAlgError as e:
+                err = np.full(len(I), np.nan)
+
+            result[d_idx, 9:13] = np.sqrt(err)
+
+        if plot_localize:
+            if q == 1:
+                ax.imshow(psf_image, cmap = 'gray')
+                ax.plot(
+                    [pars[1] - detect_x + half_w - 0.5],
+                    [pars[0] - detect_y + half_w - 0.5],
+                    marker = '.',
+                    markersize = 10,
+                    color = 'r',
+                )
+            else:
+                ax[d_idx//q, d_idx%q].imshow(
+                    psf_image, cmap = 'gray',
+                )
+                ax[d_idx//q, d_idx%q].plot(
+                    [pars[1] - detect_x + half_w - 0.5],
+                    [pars[0] - detect_y + half_w - 0.5],
+                    marker = '.',
+                    markersize = 10,
+                    color = 'r',
+                )
+
+    if plot_localize:
+        plt.show(); plt.close()
+
+    return result 
+
+
 def detect_and_localize_file(
     file_name,
     sigma = 1.0,
@@ -130,16 +520,17 @@ def detect_and_localize_file(
     window_size = 9,
     detect_threshold = 20.0,
     damp = 0.2,
-    camera_bg = 0,
-    camera_gain = 1,
-    max_iter = 10,
+    camera_bg = 470,
+    camera_gain = 110,
+    max_iter = 20,
     plot = False,
     initial_guess = 'radial_symmetry',
-    convergence_crit = 3.0e-3,
-    divergence_crit = 1.0,
+    convergence_crit = 3.0e-4,
+    divergence_crit = 1000.0,
     max_locs = 1000000,
     enforce_negative_definite = False,
     verbose = True,
+    calculate_error = True,
 ):
     '''
     Detect and localize Gaussian spots in every frame of a single
@@ -237,8 +628,39 @@ def detect_and_localize_file(
     H = np.zeros((4, 4), dtype = 'float64')
     
     # Store the results of localization in a large numpy.array. 
-    locs = np.zeros((max_locs, 10), dtype = 'float64')
-    
+    if calculate_error:
+        locs = np.zeros((max_locs, 14), dtype = 'float64')
+        columns = [
+            'detect_y_pixels',
+            'detect_x_pixels',
+            'y_pixels',
+            'x_pixels',
+            'I0',
+            'bg',
+            'error',
+            'subwindow_variance',
+            'frame_idx',
+            'llr_detection',
+            'err_y_pixels',
+            'err_x_pixels',
+            'err_I0',
+            'err_bg',
+        ]
+    else:   
+        locs = np.zeros((max_locs, 10), dtype = 'float64')
+        columns = [
+            'detect_y_pixels',
+            'detect_x_pixels',
+            'y_pixels',
+            'x_pixels',
+            'I0',
+            'bg',
+            'error',
+            'subwindow_variance',
+            'frame_idx',
+            'llr_detection',
+        ]
+
     # Current localization index
     c_idx = 0
     
@@ -257,10 +679,10 @@ def detect_and_localize_file(
         # Calculate the likelihood of a spot in each pixel,
         # and set bad values to 1.0 (i.e. no chance of detection)
         L = 1 - (C**2) / (Sgc2*(B - (A**2)/float(n_pixels)))
-        L[:4,:] = 1.0
-        L[:,:4] = 1.0
-        L[-4:,:] = 1.0
-        L[:,-4:] = 1.0
+        L[:half_w,:] = 1.0
+        L[:,:half_w] = 1.0
+        L[-(1+half_w):,:] = 1.0
+        L[:,-(1+half_w):] = 1.0
         L[L <= 0.0] = 0.001
 
         # Calculate log likelihood of the presence of a spot
@@ -274,7 +696,7 @@ def detect_and_localize_file(
         peaks = utils.local_max_2d(LL) & detections
 
         # Find the coordinates of the detections
-        detected_positions = np.asarray(np.nonzero(peaks)).T 
+        detected_positions = np.asarray(np.nonzero(peaks)).T + 1
         
         # Copy the detection information to the result array
         n_detect = detected_positions.shape[0]
@@ -456,12 +878,29 @@ def detect_and_localize_file(
                 pars = pars + update 
                 iter_idx += 1
 
-            # If the estimate is diverging, fall back to the initial guess.
-            if any(np.abs(update[:2]) >= divergence_crit) or \
-                ~check_pos_inside_window(pars[:2], window_size, edge_tolerance = 2) or \
-                (pars[2] > 1000):
-                pars = init_pars
+                # Debugging
+                if plot:
+                    print('iter %d' % iter_idx)
+                    fig, ax = plt.subplots(1, 2, figsize = (6, 3))
+                    ax[0].imshow(psf_image)
+                    ax[1].imshow(model)
+                    print(pars[:2])
+                    for j in range(2):
+                        ax[j].plot(
+                            [pars[1]],
+                            [pars[0]],
+                            color = 'k',
+                            markersize = 10,
+                            marker = '.',
+                        )
+                    plt.show(); plt.close()
 
+
+            # If the estimate is diverging, fall back to the initial guess.
+            if any(np.abs(update[:2]) >= divergence_crit):
+                pars = init_pars
+            if  ~check_pos_inside_window(pars[:2], window_size, edge_tolerance = 2):
+                pars = init_pars
             else:
                 # Correct for the half-pixel indexing error that results from
                 # implicitly assigning intensity values to the corners of pixels
@@ -481,23 +920,34 @@ def detect_and_localize_file(
                         
             # Update the number of current localizations
             c_idx += 1
+
+            # Make an estimate for the error in the parameter estimation 
+            # by inverting the observed information matrix, acquired
+            # from the Jacobian
+            if calculate_error:
+
+                # Jacobian: 4-by-n_pixels matrix of the derivatives
+                # of each model parameter at each pixel
+                jac = np.array((du_dy, du_dx, du_dI0, du_dbg))
+                J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
+                _grad = (jac[:,nonzero] * J_factor).sum(1)
+                jac_div_sqrt_model = jac[:,nonzero] / np.sqrt(model[nonzero])
+
+                # Observed information matrix I
+                I = jac_div_sqrt_model.dot(jac_div_sqrt_model.T)
+                try:
+                    err = np.diagonal(np.linalg.inv(I))
+                except np.linalg.LinAlgError as e:
+                    err = np.zeros(4)
+
+                locs[c_idx, 10:14] = np.sqrt(err)
         
     # Truncate the result to the actual number of localizations
     locs = locs[:c_idx, :]
         
     # Format the result as a pandas.DataFrame, and enforce some typing
-    df_locs = pd.DataFrame(locs, columns = [
-        'detect_y_pixels',
-        'detect_x_pixels',
-        'y_pixels',
-        'x_pixels',
-        'I0',
-        'bg',
-        'error',
-        'subwindow_variance',
-        'frame_idx',
-        'llr_detection',
-    ])
+    df_locs = pd.DataFrame(locs, columns = columns)
+
     df_locs['detect_y_pixels'] = df_locs['detect_y_pixels'].astype('uint16')
     df_locs['detect_x_pixels'] = df_locs['detect_x_pixels'].astype('uint16')
     df_locs['error'] = df_locs['error'].astype('bool')
@@ -522,6 +972,7 @@ def detect_and_localize_file(
         'detect_threshold' : detect_threshold,
         'file_type' : '.nd2',
         'image_file' : file_name,
+        'image_file_path' : os.path.abspath(file_name),
     }
 
     # If desired, save to a file
@@ -560,10 +1011,10 @@ def detect_and_localize_file_parallelized(
     damp = 0.2,
     camera_bg = 0,
     camera_gain = 1,
-    max_iter = 10,
+    max_iter = 20,
     plot = False,
     initial_guess = 'radial_symmetry',
-    convergence_crit = 3.0e-3,
+    convergence_crit = 3.0e-4,
     divergence_crit = 1.0,
     max_locs = 1000000,
     enforce_negative_definite = False,
@@ -571,7 +1022,12 @@ def detect_and_localize_file_parallelized(
 ):
     raise NotImplementedError 
 
-def check_pos_inside_window(pos_vector, window_size, edge_tolerance = 2):
+def check_pos_inside_window(pos_vector, window_size, edge_tolerance = 3):
+    '''
+    Returns True if the vector is inside the window
+    and False otherwise.
+
+    '''
     return ~((pos_vector < edge_tolerance).any() or \
         (pos_vector > window_size-edge_tolerance).any())
 

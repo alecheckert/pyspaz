@@ -18,10 +18,13 @@ import pandas as pd
 # I/O
 import os
 import sys
-from . import spazio 
-from . import localize
+import pyspaz 
+from pyspaz import spazio 
+from pyspaz import localize
+from pyspaz import interpolate_mask 
 
 # Plotting
+import matplotlib
 import matplotlib.pyplot as plt 
 from matplotlib import cm
 import seaborn as sns
@@ -34,6 +37,8 @@ from tqdm import tqdm
 import ipywidgets as widgets
 from ipywidgets import interact, interactive, fixed, interact_manual
 
+
+
 def wrapup(out_png, dpi = 400, open_result = True):
     ''' Save a plot to PNG '''
     plt.tight_layout()
@@ -44,14 +49,14 @@ def wrapup(out_png, dpi = 400, open_result = True):
 
 def loc_density(
     locs,
-    metadata = {},
+    metadata,
     ax = None,
     upsampling_factor = 20,
     kernel_width = 0.5,
     verbose = False,
     y_col = 'y_pixels',
     x_col = 'x_pixels',
-    convert_to_um = True,
+    convert_to_um = False,
     vmax_mod = 1.0,
     cmap = 'gray',
     out_png = 'default_loc_density_out.png',
@@ -61,10 +66,13 @@ def loc_density(
     m_keys = list(metadata.keys())
     positions = np.asarray(locs[[y_col, x_col]])
     if convert_to_um and ('pixel_size_um' in m_keys):
+        metadata['pixel_size_um'] = float(metadata['pixel_size_um'])
         positions = positions * metadata['pixel_size_um']
 
     # Make the size of the out frame
     if ('N' in m_keys) and ('M' in m_keys):
+        metadata['N'] = int(metadata['N'])
+        metadata['M'] = int(metadata['M'])
         if convert_to_um:
             n_up = int(metadata['N'] * metadata['pixel_size_um']) * upsampling_factor
             m_up = int(metadata['M'] * metadata['pixel_size_um']) * upsampling_factor
@@ -111,35 +119,122 @@ def loc_density(
         if verbose:
             sys.stdout.write('Finished compiling the densities of %d/%d localizations...\r' % (loc_idx+1, n_locs))
             sys.stdout.flush()
-    if (save_plot == True) and (ax == None):
-        fig, ax = plt.subplots(figsize = (4, 4))
-        ax.imshow(
-            density[::-1,:],
-            cmap=cmap,
-            vmax=density.mean() + density.std() * vmax_mod,
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        wrapup(out_png)
-    else:
-        ax.imshow(
-            density[::-1,:],
-            cmap=cmap,
-            vmax=density.mean() + density.std() * vmax_mod,
-        )
+    if (save_plot == True):
+        if (ax == None):
+            fig, ax = plt.subplots(figsize = (4, 4))
+            ax.imshow(
+                density[::-1,:],
+                cmap=cmap,
+                vmax=density.mean() + density.std() * vmax_mod,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            wrapup(out_png)
+        else:
+            ax.imshow(
+                density[::-1,:],
+                cmap=cmap,
+                vmax=density.mean() + density.std() * vmax_mod,
+            )
     return density 
+
+def show_locs(
+    locs,
+    ax = None,
+    color_attrib = 'I0',
+    cmap = 'inferno',
+    max_value = 300,
+    min_value = 0,
+    ylim = None,
+    xlim = None,
+):
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (6, 6))
+        finish_plot = True 
+    else:
+        finish_plot = False 
+
+    color_index = locs[color_attrib].copy()
+    color_index = (color_index - min_value)
+    color_index[color_index > max_value] = max_value
+
+    ax.scatter(
+        locs['x_pixels'],
+        locs['y_pixels'],
+        c = color_index,
+        cmap = cmap,
+        s = 2,
+    )
+    if type(ylim) == type((0,0)):
+        ax.set_ylim(ylim)
+    if type(xlim) == type((0,0)):
+        ax.set_xlim(xlim)
+
+    if finish_plot:
+        plt.show(); plt.close()
+
+def attrib_dist(
+    locs,
+    ax = None,
+    attrib = 'I0',
+    color = '#C2C2C2',
+    bin_size = 20,
+    max_value = 500,
+    label = None,
+):
+    bin_edges = np.arange(0, max_value+bin_size, bin_size)
+    histo, edges = np.histogram(locs[attrib], bins=bin_edges)
+    bin_centers = bin_edges[:-1] + bin_size/2
+
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (3, 2))
+        finish_plot = True 
+    else:
+        finish_plot = False 
+
+    ax.bar(
+        bin_centers,
+        histo,
+        width = bin_size * 0.8,
+        edgecolor = 'k',
+        linewidth = 2,
+        color = color,
+    )
+    if label == None:
+        ax.set_xlabel(attrib)
+    else:
+        ax.set_xlabel(label)
+    ax.set_ylabel('Localizations')
+
+    if finish_plot:
+        plt.tight_layout(); plt.show(); plt.close()
+
+
+
+
+
     
-def loc_density_from_trajs(
+def loc_density_from_trajs_mat_format(
     trajs,
+    metadata,
     ax = None,
     upsampling_factor = 20,
     verbose = False,
 ):
-    locs = spazio.extract_positions_from_trajs(trajs)
-    loc_density(locs, ax=ax, upsampling_factor=upsampling_factor,
-        verbose=verbose)
+    locs = pd.DataFrame(spazio.extract_positions_from_trajs(trajs)/metadata['pixel_size_um'], columns = ['y_um', 'x_um'])
+    density = loc_density(
+        locs,
+        metadata = metadata,
+        ax=ax,
+        upsampling_factor=upsampling_factor,
+        verbose=verbose,
+        y_col = 'y_um',
+        x_col = 'x_um',
+        convert_to_um = False,
+    )
+    return density 
 
-def show_trajectories(
+def show_trajectories_mat_format(
     trajs,
     ax = None,
     cmap = 'viridis',
@@ -186,6 +281,130 @@ def show_trajectories(
             sys.stdout.write('Finished plotting %d/%d trajectories...\r' % (traj_idx + 1, cap))
             sys.stdout.flush()
     ax.set_aspect('equal')
+
+    if finish_plot:
+        plt.show(); plt.close()
+
+def show_trajectories(
+    trajs,
+    ax = None,
+    cmap = 'viridis',
+    cap = 3000,
+    color_by = None,
+    color_by_max = None,
+    n_colors = 256,
+    min_traj_len = 1,
+):
+    if min_traj_len > 1:
+        if not 'traj_len' in trajs.columns:
+            utils.assign_traj_len(trajs)
+        trajs = trajs.loc[trajs['traj_len'] >= min_traj_len]
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (4, 4))
+        finish_plot = True
+    else:
+        finish_plot = False
+
+    n_trajs = trajs['traj_idx'].max()
+
+    colors = sns.color_palette('viridis', n_colors)
+    if color_by != None:
+        if color_by_max == None:
+            max_value = trajs[color_by].max()
+        else:
+            max_value = color_by_max 
+
+    c_idx = 0
+    for traj_idx, traj in tqdm(trajs.groupby('traj_idx')):
+        if c_idx >= cap: break 
+        if color_by == None:
+            color_idx = (traj_idx * 173) % n_colors
+        else:
+            color_idx = int((traj[color_by].iloc[0] * (n_colors-1)) / max_value)
+            if color_idx > n_colors:
+                color_idx = n_colors - 1
+        ax.plot(
+            traj['x_pixels'],
+            traj['y_pixels'],
+            color = colors[color_idx],
+            marker = '.',
+        )
+        c_idx += 1
+    ax.set_aspect('equal')
+
+    if finish_plot:
+        plt.show(); plt.close()
+
+def show_masked_trajectories(
+    trajs,
+    mask_column,
+    ax = None,
+    cmaps = ['inferno', 'viridis'],
+    cap = 3000,
+    n_colors = 256,
+    min_traj_len = 1,
+    criterion = 'any',
+):
+    '''
+    Plot individual trajectories, using separate color schemes
+    for trajectories inside and outside of a mask.
+
+    args
+        trajs                   :   pandas.DataFrame
+        mask_column             :   str, boolean column in *trajs*
+                                        that indicates mask 
+                                        membership
+        ax                      :   matplotlib.Axis object
+        cmaps                   :   list of str
+        cap                     :   int, max # trajectories to plot
+        n_colors                :   int
+        min_traj_len            :   int
+        criterion               :   'any' or 'all', whether to 
+                                        include trajectories that
+                                        contain any or all localizations
+                                        inside the mask
+
+    '''
+    # Plot only long trajectories, if desired
+    if min_traj_len > 1:
+        if not 'traj_len' in trajs.columns:
+            utils.assign_traj_len(trajs)
+
+    # If the user doesn't specify a matplotlib.Axis
+    # object, make one
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (4, 4))
+        finish_plot = True 
+    else:
+        finish_plot = False
+
+    # Generate the color palettes
+    n_trajs = trajs['traj_idx'].max()
+    color_palettes = [
+        sns.color_palette(cmaps[0], n_colors),
+        sns.color_palette(cmaps[1], n_colors),
+    ]
+
+    c_idx = 0
+    for traj_idx, traj in tqdm(trajs.groupby('traj_idx')):
+        if c_idx >= cap: break
+        if (criterion == 'any' and traj[mask_column].any()) or \
+            (criterion == 'all' and traj[mask_column].all()):
+            color = color_palettes[0][(traj_idx * 173) % n_colors]
+        else:
+            color = color_palettes[1][(traj_idx * 173) % n_colors]
+
+        ax.plot(
+            traj['x_pixels'],
+            traj['y_pixels'],
+            color = color,
+            marker = '.',
+        )
+        c_idx += 1
+    ax.set_aspect('equal')
+    if finish_plot:
+        plt.show(); plt.close()
+
 
 
 #
@@ -602,11 +821,118 @@ def optimize_detection_log_interactive(
         threshold = widgets.FloatSlider(value = 100, min = 0.1, max = 1000.0, continuous_update = False),
     )
 
+# 
+# Visualize mask interpolator object
+#
+def plot_mask_interpolator(
+    mask_interpolator,
+    ax = None,
+    n_frames = 100,
+    cmap = 'viridis',
+):
+    '''
+    Visualize a mask interpolator object by overlaying the 
+    interpolated mask edges at various frames.
 
+    args
+        mask_interpolator       :   either a pyspaz.interpolate_mask.LinearMaskInterpolator
+                                    or pyspaz.interpolate_mask.SplineMaskInterpolator
 
+        ax                      :   matplotlib.axes
+
+        n_frames                :   int, the number of frame intervals
+                                    to use
+
+        cmap                    :   str, argument for seaborn.color_palette
+
+    returns
+        None
+
+    '''
+    # Make sure a correct mask interpolator object is passed
+    if 'interpolate' not in dir(mask_interpolator):
+        raise RuntimeError('pyspaz.visualize.plot_mask_interpolator: interpolator must have an interpolate method')
+
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (6, 6))
+        finish_plot = True
+    else:
+        finish_plot = False
+
+    colors = sns.color_palette(cmap, n_frames)
+
+    min_frame = mask_interpolator.min_frame
+    max_frame = mask_interpolator.max_frame 
+    frames = np.linspace(min_frame, max_frame, n_frames)
+    for frame_idx, frame in enumerate(frames):
+        edge = mask_interpolator.interpolate(frame)
+        ax.plot(
+            edge[:,0],
+            edge[:,1],
+            color = colors[frame_idx],
+            linestyle = '-',
+            marker = None,
+        )
+
+        # Reconnect the first with the last point
+        ax.plot(
+            [edge[-1,0], edge[0,0]],
+            [edge[-1,1], edge[0,1]],
+            color = colors[frame_idx],
+            linestyle = '-',
+            marker = None,
+        )
+
+    ax.set_aspect('equal')
+
+    if finish_plot:
+        plt.show(); plt.close()
+
+def plot_mask_interpolators(
+    mask_interpolators,
+    ax = None,
+    n_frames = 100,
+    cmap = 'viridis',
+):
+    '''
+    Visualize a set of mask interpolator objects by overlaying the 
+    interpolated mask edges at various frames.
+
+    args
+        mask_interpolators      :   list of either pyspaz.interpolate_mask.LinearMaskInterpolator
+                                    or pyspaz.interpolate_mask.SplineMaskInterpolator
+                                    objects
+
+        ax                      :   matplotlib.axes
+
+        n_frames                :   int, the number of frame intervals
+                                    to use
+
+        cmap                    :   str, argument for seaborn.color_palette
+
+    returns
+        None
+        
+    '''
+    if ax == None:
+        fig, ax = plt.subplots(figsize = (6, 6))
+        finish_plot = True
+    else:
+        finish_plot = False 
+
+    for mask_interpolator in mask_interpolators:
+        plot_mask_interpolator(
+            mask_interpolator,
+            ax = ax,
+            n_frames = n_frames,
+            cmap = cmap,
+        )
+
+    if finish_plot:
+        plt.show(); plt.close()
 
 # 
-# Plotting utilities
+# Various low-level utilities
 #
 
 
@@ -620,7 +946,12 @@ def generate_rainbow_palette(n_colors = 256):
             255).astype('uint8')
     return result 
 
-
+def hide_axis(matplotlib_axis):
+    matplotlib_axis.grid(False)
+    for spine_dir in ['top', 'bottom', 'left', 'right']:
+        matplotlib_axis.spines[spine_dir].set_visible(False)
+    matplotlib_axis.set_xticks([])
+    matplotlib_axis.set_yticks([])
 
 
 

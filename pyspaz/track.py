@@ -38,14 +38,12 @@ def track_locs_directory(
     out_dir = None,
     d_max = 20.0,
     d_bound_naive = 0.1,
-    out_mat_file = None,
+    out_file = None,
     search_exp_fac = 3,
-    sep = '\t',
     pixel_size_um = 0.16,
     frame_interval_sec = 0.00548,
     min_int = 0.0,
     max_blinks = 0,
-    window_size = 9,
     k_return_from_blink = 1.0,
     y_int = 0.5,
     y_diff = 0.9,
@@ -61,56 +59,290 @@ def track_locs_directory(
     '''
     loc_files = glob("%s/*.locs" % directory_name)
     if out_dir == None:
-        out_mat_files = [i.replace('.locs', '_Tracked.mat') \
+        out_files = [i.replace('.locs', '_Tracked.mat') \
             for i in loc_files]
     else:
         if not os.path.isdir(out_dir):
             os.mkdir(out_dir)
-        out_mat_files = ['%s/%s' % (out_dir, \
+        out_files = ['%s/%s' % (out_dir, \
             i.split('/')[-1].replace('.locs', '_Tracked.mat')) \
             for i in loc_files]
 
     for f_idx, fname in enumerate(loc_files):
         track_locs(
             fname,
-            out_mat_file = out_mat_files[f_idx],
+            out_file = out_files[f_idx],
             d_max = d_max,
             d_bound_naive = d_bound_naive,
             search_exp_fac = search_exp_fac,
-            sep = sep,
             pixel_size_um = pixel_size_um,
             frame_interval_sec = frame_interval_sec,
             min_int = min_int,
             max_blinks = max_blinks,
-            window_size = window_size,
             k_return_from_blink = k_return_from_blink,
             y_int = y_int,
             y_diff = y_diff,
             start_frame = start_frame,
             stop_frame = stop_frame,
         )
-            
+
+def track_locs_hi_conf(
+    locs_file,
+    out_file = None,
+    d_max = 20.0,
+    search_exp_fac = 3,
+    frame_interval_sec = 0.00548,
+    pixel_size_um = 0.16,
+    max_blinks = 0,
+    min_int = 0.0,
+    start_frame = None,
+    stop_frame = None,
+):
+    # Determine the search radius, the maximum allowed distnace
+    # between a trajectory and a connecting localization
+    sig2_free = 2.0 * d_max * frame_interval_sec / (pixel_size_um ** 2)
+    search_radius = search_exp_fac * np.sqrt(np.pi * 0.5 * sig2_free)
+    search_radius_sq = search_radius ** 2
+
+    locs, metadata = spazio.load_locs(locs_file)
+    columns = ['frame_idx', 'y_pixels', 'x_pixels', 'I0', 'bg', 'llr_detection']
+    if not all([c in locs.columns for c in columns]):
+        raise RuntimeError("Localization CSV must contains columns %s" % ', '.join(columns))
+
+    # Truncate localizations to begin and end at the 
+    # desired frame interval for tracking
+    if start_frame != None:
+        locs = locs[locs['frame_idx'] >= start_frame]
+    else:
+        start_frame = 0
+    if stop_frame != None:
+        locs = locs[locs['frame_idx'] <= stop_frame]
+    n_frames = int(locs['frame_idx'].max())
+
+    # Convert the important columns to an ndarray for faster indexing
+    locs = np.asarray(locs[columns])
+
+    # Initiate trajectories from each localization in the first frame
+    if start_frame != None:
+        frame_idx = start_frame 
+    else:
+        frame_idx = 0
+    frame_locs = locs[locs[:,0] == frame_idx, :]
+    active_trajectories = [Trajectory(frame_locs[i, :], 0.0, (0,1)) \
+        for i in range(frame_locs.shape[0])]
+
+    new_trajectories = []
+    completed_trajectories = []
+
+    # Go through the frames, reconnecting trajectories with 
+    # localizations as we go
+    for frame_idx in tqdm(range(start_frame + 1, n_frames + 1)):
+
+        # Get all locs in this frame
+        frame_locs = locs[locs[:,0] == frame_idx, :]
+
+        # Get the size of the frame-wide tracking problem
+        n_trajs = len(active_trajectories)
+        n_locs = frame_locs.shape[0]
+
+        # If there are no active trajectories, consider starting
+        # some from the localizations if they pass the minimum
+        # intensity threshold. Set these as active trajectories
+        # and go on to the next frame.
+        if n_trajs == 0:
+            for loc_idx in range(n_locs):
+                loc = frame_locs[loc_idx, :]
+                if loc[3] >= min_int:
+                    new_trajectory = Trajectory(loc, 0.0, (0, 1))
+                    new_trajectories.append(new_trajectory)
+            active_trajectories = copy(new_trajectories)
+            new_trajectories = []
+            continue 
+
+        # If there are no localizations, set all of the trajectories
+        # into blink and move onto the next frame
+        if n_locs == 0:
+            for traj_idx, trajectory in enumerate(active_trajectories):
+
+                # Increment this trajectory's blink counter
+                trajectory.n_blinks += 1
+
+                # Terminate this trajectory if it has too many blinks
+                if trajectory.n_blinks > max_blinks:
+                    completed_trajectories.append(trajectory)
+
+                # Otherwise deal with it in the next frame
+                else:
+                    new_trajectories.append(trajectory)
+
+            active_trajectories = copy(new_trajectories)
+            new_trajectories = []
+            continue 
+
+        # Otherwise, we have some number of trajectories and localizations
+        # in the frame. First, get the adjacency matrix.
+        sq_radial_distances = utils.sq_radial_distance_array(
+            np.asarray([traj.positions[-1, :] for traj in active_trajectories]),
+            frame_locs[:, 1:3],
+        )
+        adjacency_matrix = (sq_radial_distances <= search_radius_sq).astype('uint16')
+
+        # Break the assignment problem into subproblems based on adjacency
+        subgraphs, y_index_lists, x_index_lists, trajs_without_locs, locs_without_trajs = \
+            utils.connected_components(adjacency_matrix)
+
+        # Deal with trajectories without localizations in their search radii
+        for traj_idx in trajs_without_locs:
+
+            # Get the corresponding trajectory from the pool of running
+            # trajectories
+            trajectory = active_trajectories[traj_idx]
+
+            # Increment the blink counter of this trajectory
+            trajectory.n_blinks += 1
+
+            # If this trajectory has too many blinks, terminate it
+            if trajectory.n_blinks > max_blinks:
+                completed_trajectories.append(trajectory)
+            else:
+                new_trajectories.append(trajectory)
+
+        # Deal with localizations that do not lie within the search radius
+        # of any trajectory, starting new trajectories if they pass the
+        # intensity threshold
+        for loc_idx in locs_without_trajs:
+            loc = frame_locs[loc_idx, :]
+            if loc[3] >= min_int:
+                new_trajectory = Trajectory(loc, 0.0, (0, 1))
+                new_trajectories.append(new_trajectory)
+
+        # The remainder of the assignment subproblems have some number
+        # of trajectories and some number of localizations
+        for subgraph_idx, subgraph in enumerate(subgraphs):
+
+            # If there is only one trajectory and only one localization,
+            # the assignment is unambiguous
+            if subgraph.shape == (1, 1):
+
+                # Get the corresponding trajectory by looking up its 
+                # index in the assignment subproblem
+                traj_idx = y_index_lists[subgraph_idx][0]
+                trajectory = active_trajectories[traj_idx]
+
+                # Find the corresponding localization
+                loc_idx = x_index_lists[subgraph_idx][0]
+                loc = frame_locs[loc_idx, :]
+
+                # Add the localization to the trajectory
+                trajectory.add_loc(loc, (1, 1))
+
+                # Copy to the trajectory list for the next frame
+                new_trajectories.append(trajectory)
+
+            # Otherwise we have some ambiguity: multiple trajectories
+            # and/or localizations. Kill all ambiguity in the problem
+            # and start again.
+            else:
+
+                # Terminate each trajectory in this subproblem
+                traj_indices = y_index_lists[subgraph_idx]
+                for traj_idx in traj_indices:
+                    completed_trajectories.append(active_trajectories[traj_idx])
+
+                # For each localization, start a new trajectory if it
+                # passes the intensity threshold
+                for loc_idx in x_index_lists[subgraph_idx]:
+                    loc = frame_locs[loc_idx, :]
+                    if loc[3] >= min_int:
+                        new_trajectory = Trajectory(loc, 0.0, (0, 1))
+                        new_trajectories.append(new_trajectory)
+
+        # Pass any active trajectories to be considered for reconnection
+        # in the next frame.
+        active_trajectories = new_trajectories
+        new_trajectories = []
+
+    # Wrap up any trajectories that are still running in the last frame
+    for traj_idx, trajectory in enumerate(active_trajectories):
+        completed_trajectories.append(copy(trajectory))
+
+    # Make output filename
+    if out_file == None:
+        out_file = '%s_Tracked.mat' % locs_file.replace('.locs', '')
+
+    # Add tracking parameters to metadata
+    for k in metadata.keys():
+        if metadata[k] == None:
+            metadata[k] = 'None'
+
+    metadata['locs_used_for_tracking'] = locs_file
+    metadata['d_max'] = d_max
+    metadata['d_bound_naive'] = 'None' 
+    metadata['search_exp_fac'] = search_exp_fac
+    metadata['frame_interval_sec'] = frame_interval_sec
+    metadata['pixel_size_um'] = pixel_size_um
+    metadata['min_int'] = min_int
+    metadata['max_blinks'] = max_blinks
+    metadata['k_return_from_blink'] = 'None'
+    metadata['y_int'] = 'None'
+    metadata['y_diff'] = 'None' 
+    metadata['tracking_start_frame'] = str(start_frame)
+    metadata['tracking_stop_frame'] = str(stop_frame)
+
+    # Save to file
+    spazio.save_trajectory_obj_to_mat(
+        out_file,
+        completed_trajectories,
+        metadata,
+        frame_interval_sec,
+        pixel_size_um = pixel_size_um,
+        convert_pixel_to_um = True,
+    )
+
+    # Return (trajs, metadata, traj_cols)
+    return spazio.load_trajs(out_file)
+
+OUTPUT_FORMATS = [
+    'mat',
+    'txt',
+]
+ALGORITHM_TYPES = [
+    'full',
+    'conservative',
+    'equal_size',
+]
 
 def track_locs(
     loc_file,
-    out_mat_file = None,
+    out_file = None,
     d_max = 20.0,
     d_bound_naive = 0.1,
     search_exp_fac = 3,
-    sep = '\t',
     pixel_size_um = 0.16,
     frame_interval_sec = 0.00548,
     min_int = 0.0,
     max_blinks = 0,
-    window_size = 9,
     k_return_from_blink = 1.0,
     y_int = 0.5,
     y_diff = 0.9,
     start_frame = None,
     stop_frame = None,
+    output_format = 'txt',
+    algorithm_type = 'full',
 ):
-    # The number of pixels in the detection / localization window
-    n_pixels = window_size ** 2
+    # Check that user has specified compatible file formats 
+    if output_format not in OUTPUT_FORMATS:
+        raise RuntimeError('track.track_locs: output format %s not supported; use one of %s' % (output_format, ', '.join(OUTPUT_FORMATS)))
+
+    if type(out_file) == type(''):
+        if output_format == 'mat' and '.mat' not in out_file:
+            raise RuntimeError('track.track_locs: out file %s not compatible with output format .mat' % out_file)
+        elif output_format == 'txt' and not ('.trajs' in out_file or '.txt' in out_file):
+            raise RuntimeError('track.track_locs: out file %s not compatible with output format .txt' % out_file)
+
+    # Check that user has supplied an available reconnection algorithm
+    if algorithm_type not in ALGORITHM_TYPES:
+        raise RuntimeError('track.track_locs: algorithm type %s not supported; use one of %s' % (algorithm_type, ', '.join(ALGORITHM_TYPES)))
 
     # Calculate the two-dimensional radial variance for 
     # a particle traveling at *d_max* or *d_bound_naive*
@@ -152,12 +384,15 @@ def track_locs(
 
     # Initiate trajectories from each localization in the
     # first frame
-    if start_frame != None:
-        frame_idx = start_frame
-    else:
-        frame_idx = 0
+    if start_frame == None:
+        start_frame = 0
+    frame_idx = start_frame
+
+    if stop_frame == None:
+        stop_frame = n_frames - 1
+
     frame_locs = locs[locs[:,0] == frame_idx, :]
-    active_trajectories = [Trajectory(frame_locs[i, :], sig2_bound_naive) \
+    active_trajectories = [Trajectory(frame_locs[i, :], sig2_bound_naive, (0,1)) \
         for i in range(frame_locs.shape[0])]
 
     # Save trajectories as we go in three lists:
@@ -176,7 +411,7 @@ def track_locs(
 
     # Iterate through the rest of the frames, saving trajectories
     # as we go.
-    for frame_idx in tqdm(range(1, n_frames + 1)):
+    for frame_idx in tqdm(range(start_frame + 1, n_frames + 1)):
 
         # Get all localizations in this frame
         frame_locs = locs[locs[:,0] == frame_idx, :]
@@ -193,7 +428,7 @@ def track_locs(
             for loc_idx in range(n_locs):
                 loc = frame_locs[loc_idx, :]
                 if loc[3] >= min_int:
-                    new_trajectory = Trajectory(loc, sig2_bound_naive)
+                    new_trajectory = Trajectory(loc, sig2_bound_naive, (0,1))
                     new_trajectories.append(new_trajectory)
             active_trajectories = copy(new_trajectories)
             new_trajectories = []
@@ -255,7 +490,7 @@ def track_locs(
         for loc_idx in locs_without_trajs:
             loc = frame_locs[loc_idx, :]
             if loc[3] >= min_int:
-                new_trajectory = Trajectory(loc, sig2_bound_naive)
+                new_trajectory = Trajectory(loc, sig2_bound_naive, (0,1))
                 new_trajectories.append(new_trajectory)
 
         # The remainder of the assignment subproblems have some number of 
@@ -276,33 +511,53 @@ def track_locs(
                 loc = frame_locs[loc_idx, :]
 
                 # Add the localization to the trajectory
-                trajectory.add_loc(loc)
+                trajectory.add_loc(loc, (1,1))
 
                 # Copy to the trajectories for the next frame
                 new_trajectories.append(trajectory)
 
             # Otherwise we have some ambiguity: multiple trajectories and/or
-            # localizations. Pass the problem to the assign() function, which
+            # localizations. Pass the problem to the *assign* function, which
             # solves individual subgraph problems with the Hungarian algorithm
             else:
-                running_trajectories, finished_trajectories = assign(
-                    [active_trajectories[i] for i in y_index_lists[subgraph_idx]],
-                    frame_locs[x_index_lists[subgraph_idx], :],
-                    mean_spot_intensity,
-                    var_spot_intensity,
-                    frame_interval_sec = frame_interval_sec,
-                    sig2_bound_naive = sig2_bound_naive,
-                    sig2_free = sig2_free,
-                    n_pixels = n_pixels,
-                    k_return_from_blink = k_return_from_blink,
-                    y_int = y_int,
-                    y_diff = y_diff,
-                    max_blinks = max_blinks,
-                )
-                for trajectory in running_trajectories:
-                    new_trajectories.append(copy(trajectory))
-                for trajectory in finished_trajectories:
-                    completed_trajectories.append(copy(trajectory))
+                if algorithm_type == 'full':
+                    running_trajectories, finished_trajectories = assign_full(
+                        [active_trajectories[i] for i in y_index_lists[subgraph_idx]],
+                        frame_locs[x_index_lists[subgraph_idx], :],
+                        mean_spot_intensity,
+                        var_spot_intensity,
+                        frame_interval_sec = frame_interval_sec,
+                        sig2_bound_naive = sig2_bound_naive,
+                        sig2_free = sig2_free,
+                        k_return_from_blink = k_return_from_blink,
+                        y_int = y_int,
+                        y_diff = y_diff,
+                        max_blinks = max_blinks,
+                    )
+                    for trajectory in running_trajectories:
+                        new_trajectories.append(copy(trajectory))
+                    for trajectory in finished_trajectories:
+                        completed_trajectories.append(copy(trajectory))
+
+                # Throw away all potentially ambiguous reconnections
+                elif algorithm_type == 'conservative':
+
+                    # Terminate each trajectory in this subproblem
+                    traj_indices = y_index_lists[subgraph_idx]
+                    for traj_idx in traj_indices:
+                        completed_trajectories.append(active_trajectories[traj_idx])
+
+                    # For each localization, start a new trajectory if it
+                    # passes the intensity threshold
+                    for loc_idx in x_index_lists[subgraph_idx]:
+                        loc = frame_locs[loc_idx, :]
+                        if loc[3] >= min_int:
+                            new_trajectory = Trajectory(loc, 0.0, (0, 1))
+                            new_trajectories.append(new_trajectory)
+
+                # Only solve subproblems with n_trajs == n_locs 
+                elif algorithm_type == 'equal_size':
+                    raise NotImplementedError
 
         # Pass any active trajectories to be considered for reconnection in
         # the next frame
@@ -312,10 +567,6 @@ def track_locs(
     # Wrap up any trajectories that are still running at the last frame
     for traj_idx, trajectory in enumerate(active_trajectories):
         completed_trajectories.append(copy(trajectory))
-
-    # Save to file, if desired
-    if out_mat_file == None:
-        out_mat_file = '%s_Tracked.mat' % loc_file.replace('.locs', '')
 
     # Add tracking parameters to metadata
     for k in metadata.keys():
@@ -337,19 +588,32 @@ def track_locs(
     metadata['tracking_stop_frame'] = str(stop_frame)
 
     # Save to file
-    spazio.save_trajectory_obj_to_mat(
-        out_mat_file,
-        completed_trajectories,
-        metadata,
-        frame_interval_sec,
-        pixel_size_um = pixel_size_um,
-        convert_pixel_to_um = True,
-    )
+    if output_format == 'mat':
+        if out_file == None:
+            out_file = '%s_Tracked.mat' % loc_file.replace('.locs', '')
+        spazio.save_trajectory_obj_to_mat(
+            out_file,
+            completed_trajectories,
+            metadata,
+            frame_interval_sec,
+            pixel_size_um = pixel_size_um,
+            convert_pixel_to_um = True,
+        )
+    elif output_format == 'txt':
+        if out_file == None:
+            out_file = '%s.trajs' % loc_file.replace('.locs', '')
+        spazio.save_trajectory_obj_to_txt(
+            out_file,
+            completed_trajectories,
+            metadata,
+            frame_interval_sec,
+            pixel_size_um = pixel_size_um,
+        )
 
     # Return (trajs, metadata, traj_cols)
-    return spazio.load_trajs(out_mat_file)
+    return spazio.load_trajs(out_file)
 
-def assign(
+def assign_full(
     trajectories,
     localizations,
     mean_spot_intensity,
@@ -357,7 +621,6 @@ def assign(
     frame_interval_sec = 0.00548,
     sig2_bound_naive = 0.0584,
     sig2_free = 8.77,
-    n_pixels = 81,
     k_return_from_blink = 1.0,
     y_int = 0.5,
     y_diff = 0.9,
@@ -385,9 +648,6 @@ def assign(
                                     ~= 0.0584
         sig2_free               :   float, the same parameter but
                                     for the free population
-        n_pixels                :   int, the number of pixels
-                                    per subwindow during the detection
-                                    step
         k_return_from_blink     :   float, the rate constant governing
                                     the return-from-blink Poisson process
                                     in frames^-1
@@ -515,7 +775,7 @@ def assign(
         else:
             loc_idx = assign_locs[traj_idx]
             loc = localizations[loc_idx, :]
-            trajectory.add_loc(loc)
+            trajectory.add_loc(loc, (n_trajs, n_locs))
 
             # Pass the trajectory on for reconnection in the next frame
             active_trajectories.append(trajectory)
@@ -529,12 +789,13 @@ def assign(
         # Index corresponds to a real localization
         if loc_idx < n_locs:
             loc = localizations[loc_idx, :]
-            trajectory = Trajectory(loc, sig2_bound_naive)
+            trajectory = Trajectory(loc, sig2_bound_naive, (n_trajs, n_locs))
 
             # Pass the trajectory for reconnection in the next frame
             active_trajectories.append(trajectory)
 
     return active_trajectories, finished_trajectories
+
 
 class Trajectory(object):
     '''
@@ -555,11 +816,21 @@ class Trajectory(object):
     radial displacement variance, lacking prior 
     information for this trajectory.
 
+    *subproblem_shape* is a 2-tuple (int, int), the
+        number of competing trajectories and localizations
+        for that localization.
+
+        (0, non-zero) -> a new trajectory with no surrounding trajectories
+        (non-zero, 0) -> termination (should not occur)
+        (1, 1)        -> unambiguous 1:1 traj:loc assignment
+        (n, m)        -> n trajectories competing for m localizations
+
     '''
     def __init__(
         self,
         loc,
         naive_sig2,
+        subproblem_shape,
     ):
         self.positions = np.asarray([loc[1:3]])
         self.frames = [int(loc[0])]
@@ -567,9 +838,10 @@ class Trajectory(object):
         self.mle_bg = [loc[4]]
         self.llr_detect = [loc[5]]
         self.n_blinks = 0
-        self.naive_sig2 = naive_sig2 
+        self.naive_sig2 = naive_sig2
+        self.subproblem_shapes = [subproblem_shape]
 
-    def add_loc(self, loc):
+    def add_loc(self, loc, subproblem_shape):
         # Update the positions array: extend the numpy array by 1
         # index to accommodate the new localization
         new_pos = np.zeros((self.positions.shape[0]+1, 2), \
@@ -586,6 +858,10 @@ class Trajectory(object):
 
         # Set the blink counter back to 0
         self.n_blinks = 0
+
+        # Record the size of the tracking subproblem
+        self.subproblem_shapes.append(subproblem_shape)
+
 
     def calculate_sig2_bound(self):
         # If the trajectory has a past history, use this to estimate
@@ -604,9 +880,6 @@ class Trajectory(object):
         sig2_bound = sig2_bound * (1 + self.n_blinks)
 
         return sig2_bound
-
-
-
 
 
 
