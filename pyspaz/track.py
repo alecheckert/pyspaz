@@ -361,7 +361,8 @@ def track_locs(
     # Read the localization csv and make sure we have all of the 
     # right columns
     locs_df, metadata = spazio.load_locs(loc_file)
-    columns = ['frame_idx', 'y_pixels', 'x_pixels', 'I0', 'bg', 'llr_detection']
+    locs_df['loc_idx'] = np.arange(len(locs_df))
+    columns = ['frame_idx', 'y_pixels', 'x_pixels', 'I0', 'bg', 'llr_detection', 'loc_idx']
     if not all([c in locs_df.columns for c in columns]):
         raise RuntimeError("Localization CSV must contains columns %s" % ', '.join(columns))
 
@@ -568,11 +569,21 @@ def track_locs(
     for traj_idx, trajectory in enumerate(active_trajectories):
         completed_trajectories.append(copy(trajectory))
 
-    # Add tracking parameters to metadata
+    # Update the result dataframe
+    for col_name in ['traj_idx', 'subproblem_n_traj', 'subproblem_n_loc']:
+        locs_df[col_name] = np.zeros(len(locs_df), dtype='uint16')
+
+    for traj_idx, traj in enumerate(completed_trajectories):
+        locs_df.loc[traj.loc_indices, 'traj_idx'] = traj_idx 
+        locs_df.loc[traj.loc_indices, 'subproblem_n_traj'] = [traj.subproblem_shapes[i][0] for i in range(len(traj.subproblem_shapes))]
+        locs_df.loc[traj.loc_indices, 'subproblem_n_loc'] = [traj.subproblem_shapes[i][1] for i in range(len(traj.subproblem_shapes))]
+
+    # Convert metadata None to str 'None'
     for k in metadata.keys():
         if metadata[k] == None:
             metadata[k] = 'None'
 
+    # Update the metadata with tracking parameters
     metadata['locs_used_for_tracking'] = loc_file
     metadata['d_max'] = d_max
     metadata['d_bound_naive'] = d_bound_naive
@@ -602,13 +613,14 @@ def track_locs(
     elif output_format == 'txt':
         if out_file == None:
             out_file = '%s.trajs' % loc_file.replace('.locs', '')
-        spazio.save_trajectory_obj_to_txt(
-            out_file,
-            completed_trajectories,
-            metadata,
-            frame_interval_sec,
-            pixel_size_um = pixel_size_um,
-        )
+        # spazio.save_trajectory_obj_to_txt(
+        #     out_file,
+        #     completed_trajectories,
+        #     metadata,
+        #     frame_interval_sec,
+        #     pixel_size_um = pixel_size_um,
+        # )
+        spazio.save_locs(out_file, locs_df, metadata)
 
     # Return (trajs, metadata, traj_cols)
     return spazio.load_trajs(out_file)
@@ -837,6 +849,7 @@ class Trajectory(object):
         self.mle_I0 = [loc[3]]
         self.mle_bg = [loc[4]]
         self.llr_detect = [loc[5]]
+        self.loc_indices = [int(loc[6])]
         self.n_blinks = 0
         self.naive_sig2 = naive_sig2
         self.subproblem_shapes = [subproblem_shape]
@@ -855,6 +868,7 @@ class Trajectory(object):
         self.mle_I0.append(loc[3])
         self.mle_bg.append(loc[4])
         self.llr_detect.append(loc[5])
+        self.loc_indices.append(int(loc[6]))
 
         # Set the blink counter back to 0
         self.n_blinks = 0
