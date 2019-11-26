@@ -360,22 +360,22 @@ def track_locs(
 
     # Read the localization csv and make sure we have all of the 
     # right columns
-    locs, metadata = spazio.load_locs(loc_file)
+    locs_df, metadata = spazio.load_locs(loc_file)
     columns = ['frame_idx', 'y_pixels', 'x_pixels', 'I0', 'bg', 'llr_detection']
-    if not all([c in locs.columns for c in columns]):
+    if not all([c in locs_df.columns for c in columns]):
         raise RuntimeError("Localization CSV must contains columns %s" % ', '.join(columns))
 
     # Truncate the localizations to begin and end at the 
     # desired frame interval for tracking
     if start_frame != None:
-        locs = locs[locs['frame_idx'] >= start_frame]
+        locs_df = locs_df[locs_df['frame_idx'] >= start_frame]
     if stop_frame != None:
-        locs = locs[locs['frame_idx'] <= stop_frame]
-    n_frames = int(locs['frame_idx'].max())
+        locs_df = locs_df[locs_df['frame_idx'] <= stop_frame]
+    n_frames = int(locs_df['frame_idx'].max())
 
     # Convert the important columns to numpy.array, which has
     # a quicker accession
-    locs = np.asarray(locs[columns])
+    locs = np.asarray(locs_df[columns])
 
     # Get the spot intensity mean and variance, for the intensity
     # reconnection test
