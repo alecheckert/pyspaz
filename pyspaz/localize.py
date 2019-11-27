@@ -531,6 +531,8 @@ def detect_and_localize_file(
     enforce_negative_definite = False,
     verbose = True,
     calculate_error = True,
+    start_frame = None,
+    stop_frame = None,
 ):
     '''
     Detect and localize Gaussian spots in every frame of a single
@@ -661,11 +663,19 @@ def detect_and_localize_file(
             'llr_detection',
         ]
 
+    # If start_frame is None, start at the first frame
+    if start_frame == None:
+        start_frame = 0
+
+    # If stop_frame is None, stop at the last frame
+    if stop_frame == None:
+        stop_frame = n_frames - 1
+
     # Current localization index
     c_idx = 0
     
     # Iterate through the frames
-    for frame_idx in tqdm(range(n_frames)):
+    for frame_idx in tqdm(range(start_frame, stop_frame+1)):
         
         # Get the image corresponding to this frame from the reader
         image = reader.get_frame(frame_idx).astype('float64')
@@ -1020,7 +1030,9 @@ def detect_and_localize_file_parallelized(
     enforce_negative_definite = False,
     verbose = True,
 ):
-    raise NotImplementedError 
+    # Assign each worker a specific frame range
+    raise NotImplementedError
+    
 
 def check_pos_inside_window(pos_vector, window_size, edge_tolerance = 3):
     '''

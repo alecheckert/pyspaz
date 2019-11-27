@@ -392,7 +392,23 @@ def assign_traj_lens(trajs, index_column = 'traj_idx'):
     traj_len_dict = {traj_idx : len(traj) for traj_idx, traj in trajs.groupby(index_column)}
     trajs['traj_len'] = trajs[index_column].apply(lambda x: traj_len_dict.get(x))
 
+def cartesian_product(*arrays):
+    '''
+    args
+        arrays      :   1D ndarrays
 
+    returns
+        2D ndarray of shape (N, n_arrays), where 
+            N is the product of all the array lengths, the 
+            Cartesian product of the input arrays
+            
+    '''
+    la = len(arrays)
+    dtype = np.result_type(*arrays)
+    arr = np.empty([len(a) for a in arrays] + [la], dtype = dtype)
+    for i, a in enumerate(np.ix_(*arrays)):
+        arr[..., i] = a 
+    return arr.reshape(-1, la)
 
 
 
