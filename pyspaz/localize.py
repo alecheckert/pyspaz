@@ -509,7 +509,21 @@ def localize_frame(
     if plot_localize:
         plt.show(); plt.close()
 
-    return result 
+    # Format the result as a dataframe
+    result_df = pd.DataFrame(result, columns = [
+        'y_detect_pixels',
+        'x_detect_pixels',
+        'llr_detection',
+        'y_pixels',
+        'x_pixels',
+        'I0',
+        'bg',
+        'error',
+        'subwindow_variance',
+        'empty'
+    ])
+
+    return result_df
 
 
 def detect_and_localize_file(
