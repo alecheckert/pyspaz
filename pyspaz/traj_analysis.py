@@ -3,6 +3,9 @@ traj_analysis.py
 '''
 # Numerical tools
 import numpy as np 
+from scipy.optimize import curve_fit 
+from scipy.special import erf, gamma, gammainc, gammaincc
+from scipy.integrate import quad 
 
 # Dataframes
 import pandas as pd 
@@ -18,11 +21,7 @@ from copy import copy
 # pyspaz functions
 from pyspaz import spazio
 from pyspaz import mask
-
-# Models available for comparison
-MODELS = {
-    'two_state_brownian_zcorr' = two_state_brownian_zcorr,
-}
+from pyspaz import utils 
 
 def compile_displacements(
     trajs,
@@ -189,8 +188,12 @@ def compile_displacements_directory(
 def fit_radial_disp_model(
     radial_disp_histograms,
     bin_edges,
+    delta_t,
     model,
-    plot = True,
+    initial_guess_bounds = None,
+    initial_guess_n = None,
+    fit_bounds = None,
+    plot = False,
     **model_kwargs,
 ):
     '''
@@ -203,15 +206,31 @@ def fit_radial_disp_model(
         bin_edges                   :   1D ndarray of shape (n_bins,), the 
                                             edges of each radial displacement bin
 
+        delta_t                     :   float, the interval between frames in 
+                                            seconds
+
+        initial_guess_bounds        :   2-tuple of 1D ndarray, the lower and upper
+                                            bounds for the initial guesses. For instance:
+                                            (np.array([0.0, 0.0, 0.5]), np.array([1.0, 0.05, 20.0]))
+
+        initial_guess_n             :   tuple of int, the number of initial guesses
+                                            for each model fit parameter
+
+        fit_bounds                  :   2-tuple of 1D ndarray, the lower and upper
+                                            bounds for parameter estimation                     
+
         model                       :   str, the model's key
 
         model_kwargs                :   for the model function
+
+    If any of initial_guess_bounds, initial_guess_n, or fit_bounds is None,
+    then program chooses a default set of parameters for these variables
+    according to DEFAULTS.
 
     returns
         1D ndarray, the fit parameters for the model
 
     '''
-    # 
     # Get the function corresponding to the model
     try:
         model_f = MODELS[model]
@@ -219,11 +238,36 @@ def fit_radial_disp_model(
         raise RuntimeError('traj_analysis.fit_radial_disp_model: model %s ' \
             'not supported; available models are %s' % (model, ', '.join(MODELS)))
 
-    # Fit data to the model
-    popt = model_f(
+    # Get default fitting/guess bounds if the user doesn't
+    # provide them
+    if type(initial_guess_bounds) == type(None):
+        initial_guess_bounds = DEFAULTS[model]['initial_guess_bounds']
+
+    if type(initial_guess_n) == type(None):
+        initial_guess_n = DEFAULTS[model]['initial_guess_n']
+
+    if type(fit_bounds) == type(None):
+        fit_bounds = DEFAULTS[model]['fit_bounds']
+
+    # Format input data for the independent/response variable
+    # format of the scipy.optimize.curve_fit function. Here,
+    # r_dt is a 2D ndarray of shape (n_points, 2) and 
+    # ext_cdf is a 1D ndarray of shape (n_points,)
+    r_dt, ext_cdf = _format_radial_disp_cdf(
         radial_disp_histograms,
         bin_edges,
-        **model_kwargs,
+        delta_t,
+    )
+
+    # Fit data to model
+    popt, pcov = _fit_from_initial_guesses(
+        r_dt,
+        ext_cdf,
+        model_f,
+        model_kwargs,
+        initial_guess_bounds = initial_guess_bounds,
+        initial_guess_n = initial_guess_n,
+        fit_bounds = fit_bounds,
     )
 
     # Plot the result
@@ -236,22 +280,30 @@ def fit_radial_disp_model(
 
     return popt 
 
-def two_state_brownian_zcorr(
+# 
+# Fitting utilities
+#
+
+def _format_radial_disp_cdf(
     radial_disp_histograms,
     bin_edges,
-    initial_guess_bounds = ((0, 1), (0, 0.1), (0.2, 50.0)),
-    n_initial_guesses_per_parameter = 5,
+    delta_t,
 ):
-    # Calculate the empirical distribution function for each
-    # displacement histogram
-    cdfs = np.zeros((n_bins-1, n_dt), dtype = 'float64')
+    # Get the number of timepoint and radial distance bins
+    n_bins, n_dt = radial_disp_histograms.shape
+
+    # Check that the number of bins matches the input
+    assert bin_edges.shape[0]-1 == n_bins 
+
+    # Take the cumulative sum of each histogram to get the CDF
+    cdfs = np.zeros((n_dt, n_bins), dtype = 'float64')
     for dt_idx in range(n_dt):
-        cdfs[dt_idx, :] = np.cumsum(displacements[:, dt_idx])
+        cdfs[dt_idx, :] = np.cumsum(radial_disp_histograms[:, dt_idx])
         cdfs[dt_idx, :] = cdfs[dt_idx, :] / cdfs[dt_idx, -1]
 
     # Make the ext_cdf vector, which represents the response
     # variable for every tuple (r_bin, dt)
-    ext_cdf = np.zeros((n_bins-1) * n_dt, dtype = 'float64')
+    ext_cdf = np.zeros(n_dt * n_bins, dtype = 'float64')
     ext_cdf[:] = cdfs.flatten()
 
     # Make the r_dt array, which represents the independent 
@@ -261,22 +313,69 @@ def two_state_brownian_zcorr(
     # second observation. The tuple r_dt[2,:] is the independent
     # variable corresponding to the response variable ext_cdf[2]
     bin_size = bin_edges[1] - bin_edges[0]
-    n_bins = bin_edges.shape[0]
-
-    r_bins_left, dt_indices = np.mgrid[:(n_bins-1), :n_dt]
-    dt_indices = (dt_indices + 1) * dt 
+    dt_indices, r_bins_left = np.mgrid[:n_dt, :n_bins]
+    dt_indices = (dt_indices + 1) * delta_t 
     r_bins_left = r_bins_left * bin_size 
     r_bins_right = r_bins_left + bin_size 
     r_bins_center = r_bins_left + bin_size / 2
 
-    # Generate an array of initial guesses
-    lower_bounds = np.array([initial_guess_bounds[i][0] for i in range(3)])
-    upper_bounds = np.array([initial_guess_bounds[i][1] for i in range(3)])
+    r_dt = np.zeros((n_dt * n_bins, 2), dtype = 'float64')
+    r_dt[:,0] = r_bins_right.flatten()
+    r_dt[:,1] = dt_indices.flatten()
+
+    # Return the independent and response variables
+    return r_dt, ext_cdf 
+
+
+def _fit_from_initial_guesses(
+    r_dt,
+    ext_cdf,
+    model_function,
+    model_kwargs,
+    initial_guess_bounds = None,
+    initial_guess_n = None,
+    fit_bounds = None,
+):
+    '''
+    Generate an array of initial guesses and do iterative
+    fitting of the model parameters from each initial guess.
+
+    args
+        r_dt                :   2D ndarray of shape (n_points, 2),
+                                    the right bin edges and frame interval
+                                    corresponding to each data point
+
+        ext_cdf             :   1D ndarray of shape (n_points,), the 
+                                    response variable (CDF)
+
+        model_function      :   function, the model function. Should take
+                                    r_dt and fit pars and output an 
+                                    approximation to ext_cdf
+
+        initial_guess_bounds:   list of 2-tuple, the (lower, upper) bounds
+                                    for each model fit par
+
+        initial_guess_n     :   list of int, the number of initial guesses
+                                    for each parameter to use
+
+        fit_bounds          :   (1D ndarray, 1D ndarray), the lower and
+                                    upper fitting bounds for each 
+                                    parameter, passed to scipy.optimize.curve_fit's
+                                    bounds parameter
+
+    returns
+        (popt, pcov), the optimal fit parameters and the corresponding
+            covariance matrix
+
+    '''
+    # Generate the array of initial guesses
+    lower_bounds = np.array(initial_guess_bounds[0])
+    upper_bounds = np.array(initial_guess_bounds[1])
     initial_guesses = utils.cartesian_product(
         *(np.linspace(
             lower_bounds[i],
             upper_bounds[i],
-            n_initial_guesses_per_parameter
+            initial_guess_n[i]
         ) for i in range(3))
     )
     n_guesses = initial_guesses.shape[0]
@@ -285,22 +384,126 @@ def two_state_brownian_zcorr(
     sum_sq_err = np.zeros(n_guesses, dtype = 'float64')
 
     # Perform fitting, starting at each initial guess
+    def _model(r_dt, *args):
+        return model_function(r_dt, *args, **model_kwargs)
+
     for g_idx, guess in enumerate(initial_guesses):
         popt, pcov = curve_fit(
-            rad_disp_cdf,
+            _model,
             r_dt,
             ext_cdf,
-            bounds = (lower_bounds, upper_bounds),
+            bounds = fit_bounds,
             p0 = guess,
         )
         sum_sq_err[g_idx] = ((rad_disp_cdf(r_dt, *popt) - ext_cdf)**2).sum()
 
-    # Identify the guess with the lowest squared error and refit 
-    # from that one
-    raise NotImplementedError
+    # Identify the guess with the minimum sum of squares
+    m_idx = np.argmin(sum_sq_err)
+    guess = initial_guesses[m_idx, :]
+
+    # Get the corresponding fit parameters for that initial guess
+    popt, pcov = curve_fit(
+        model_function,
+        r_dt,
+        ext_cdf,
+        bounds = fit_bounds,
+        p0 = guess,
+    )
+
+    # Return the result
+    return popt, pcov 
+
+# 
+# Model functions
+#
+def model_two_state_brownian_zcorr(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+    delta_z = 0.7,
+):
+    '''
+    CDF for the radial displacements of a two-state Brownian
+    particle without state transitions. Only displacements
+    in a thin axial slice of thickness *delta_z* are observed.
+
+    args
+        r_dt                :   2D ndarray of shape (n_points, 2),
+                                    the right radial displacement bins
+                                    and frame intervals for each data point
+
+        f_bound             :   float, fraction of molecules in 
+                                    the slower-moving (`bound`) state
+
+        d_free              :   float, diffusion coefficient for 
+                                    free state in um^2 s^-1
+
+        d_bound             :   float, diffusion coefficient for
+                                    bound state in um^2 s^-1
+
+        loc_error           :   float, localization error in um
+
+        delta_z             :   float, the thickness of the axial
+                                    detection/observation slice in um
+
+    returns
+        1D ndarray, the model CDF at the points indicated by 
+            r_dt
+
+    '''
+    # 4 D t for the bound state 
+    var2_0 = 4 * d_bound * r_dt[:,1]
+
+    # 4 D t for the free state
+    var2_1 = 4 * d_free * r_dt[:,1]
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+    def _fraction_lost(z0, pos_var = var2_1[0]):
+        return 0.5 * (gammaincc(0.5, (half_z-z0)**2 / pos_var) + \
+            gammaincc(0.5, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (4 * d_free * unique_dt),
+        )[0] / delta_z 
+        #f_lost = quad(_fraction_lost, -half_z, half_z)[0] / delta_z
+        f1_corr[r_dt[:,1]==unique_dt] = f_lost * (1-f_bound)
+
+    return 1 - (1-f1_corr) * np.exp(-r2 / var2_0) - \
+        f1_corr * np.exp(-r2 / var2_1)
 
 
+# Models available for comparison
+MODELS = {
+    'two_state_brownian_zcorr' : model_two_state_brownian_zcorr,
+}
 
+# Default fitting bounds for each model, if the user doesn't
+# specify
+DEFAULTS = {
+    'two_state_brownian_zcorr' : {
+        'initial_guess_bounds' : (
+            np.array([0, 0.0, 0.2]),
+            np.array([1.0, 0.05, 20.0]),
+        ),
+        'initial_guess_n' : (10, 10, 10),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.2]),
+            np.array([1.0, 0.05, 50.0]),
+        ),
+    }
+}
 
 
 
