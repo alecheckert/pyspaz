@@ -727,6 +727,15 @@ def pdf_one_state_brownian(
 
     return r_dt[:,0] * np.exp(-r2 / var2) / (0.5 * var2)
 
+def cdf_one_state_brownian_on_fractal(
+    r_dt,
+    d,
+    df,
+    loc_error = 0.035,
+):
+    
+
+
 
 # Models available for comparison
 MODELS = {

@@ -99,7 +99,7 @@ ALGORITHM_TYPES = [
 def track_locs(
     loc_file,
     out_file = None,
-    d_max = 20.0,
+    d_max = 5.0,
     d_bound_naive = 0.1,
     search_exp_fac = 3,
     pixel_size_um = 0.16,
@@ -492,7 +492,7 @@ def assign_full(
     # a new trajectory. This is set to the log-likelihood ratio for detection.
     for j in range(n_locs):
         #LL[n_trajs:, j] = localizations[j, 5]
-        LL[n_trajs:, j] = -10.0
+        LL[n_trajs:, j] = -50.0
 
     # If i < n_trajs and j >= n_locs, then LL[i,j] is the cost of putting
     # a trajectory into blink. This is set to a fixed value.

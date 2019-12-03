@@ -457,7 +457,107 @@ def loc_density_from_file(
         out_png = out_png,
     )
 
-def overlay_trajs(
+def overlay_trajs_df(
+    nd2_file,
+    trajs,
+    start_frame,
+    stop_frame,
+    out_tif = None,
+    vmax_mod = 1.0,
+    upsampling_factor = 1,
+    crosshair_len = 2,
+    white_out_singlets = True,
+): 
+    n_frames_plot = stop_frame - start_frame + 1
+    reader = spazio.ImageFileReader(nd2_file)
+    N, M, n_frames = reader.get_shape()
+    N_up = N * upsampling_factor 
+    M_up = M * upsampling_factor
+    image_min, image_max = reader.min_max()
+    vmin = image_min
+    vmax = image_max * vmax_mod 
+
+    trajs = trajs.assign(color_idx = (trajs['traj_idx'] * 173) % 256)
+    n_locs = len(trajs)
+    required_columns = ['frame_idx', 'traj_idx', 'y_pixels', 'x_pixels']
+    if any([c not in trajs.columns for c in required_columns]):
+        raise RuntimeError('overlay_trajs: dataframe must contain frame_idx, traj_idx, y_pixels, x_pixels')
+
+   # Convert to ndarray -> faster indexing
+    locs = np.asarray(trajs[required_columns])
+
+    # Convert to upsampled pixels
+    locs[:, 2:] = locs[:, 2:] * upsampling_factor
+    locs = locs.astype('int64') 
+
+    # Add a unique random index for each trajectory
+    new_locs = np.zeros((locs.shape[0], 5), dtype = 'int64')
+    new_locs[:,:4] = locs 
+    new_locs[:,4] = (locs[:,1] * 173) % 256
+    locs = new_locs 
+
+    # If the length of a trajectory is 1, then make its color white
+    if white_out_singlets:
+        for traj_idx in range(locs[:,1].max()):
+            if (locs[:,1] == traj_idx).sum() == 1:
+                locs[(locs[:,1] == traj_idx), 4] = -1
+
+    # Do the plotting
+    colors = generate_rainbow_palette()
+
+    result = np.zeros((n_frames_plot, N_up, M_up * 2 + upsampling_factor, 4), dtype = 'uint8')
+    frame_exp = np.zeros((N_up, M_up), dtype = 'uint8')
+    for frame_idx in tqdm(range(n_frames_plot)):
+        frame = reader.get_frame(frame_idx + start_frame).astype('float64')
+        frame_rescaled = ((frame / vmax) * 255)
+        frame_rescaled[frame_rescaled > 255] = 255 
+        frame_8bit = frame_rescaled.astype('uint8')
+
+        for i in range(upsampling_factor):
+            for j in range(upsampling_factor):
+                frame_exp[i::upsampling_factor, j::upsampling_factor] = frame_8bit
+
+        result[frame_idx, :, :M_up, 3] = frame_exp.copy()
+        result[frame_idx, :, M_up + upsampling_factor:, 3] = frame_exp.copy()
+
+        result[frame_idx, :, M_up:M_up+upsampling_factor, :] = 255
+
+        for j in range(3):
+            result[frame_idx, :, :M_up, j] = frame_exp.copy()
+            result[frame_idx, :, M_up + upsampling_factor:, j] = frame_exp.copy()
+
+        locs_in_frame = locs[(locs[:,0] == frame_idx + start_frame).astype('bool'), :]
+
+        for loc_idx in range(locs_in_frame.shape[0]):
+
+            # Get the color corresponding to this trajectory
+            color_idx = locs_in_frame[loc_idx, 4]
+            if color_idx == -1:
+                color = np.array([255, 255, 255, 255]).astype('uint8')
+            else:
+                color = colors[color_idx, :]
+
+            try:
+                result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color 
+            except (KeyError, ValueError, IndexError) as e2: #edge loc
+                pass
+            for j in range(1, crosshair_len + 1):
+                try:
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + j + upsampling_factor, :] = color
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] - j + upsampling_factor, :] = color
+                    result[frame_idx, locs_in_frame[loc_idx, 2] + j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color 
+                    result[frame_idx, locs_in_frame[loc_idx, 2] - j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color
+                except (KeyError, ValueError, IndexError) as e3:  #edge loc 
+                    continue 
+
+    if out_tif == None:
+        out_tif = 'default_overlay_trajs.tif'
+
+    tifffile.imsave(out_tif, result)
+    reader.close()
+
+
+def overlay_trajs_tracked_mat(
     nd2_file,
     tracked_mat_file,
     start_frame,
@@ -467,6 +567,7 @@ def overlay_trajs(
     upsampling_factor = 1,
     crosshair_len = 2,
     pixel_size_um = 0.16,
+    white_out_singlets = True,
 ):
     n_frames_plot = stop_frame - start_frame + 1
 
@@ -509,6 +610,12 @@ def overlay_trajs(
     new_locs[:,4] = (locs[:,1] * 173) % 256
     locs = new_locs 
 
+    # If the length of a trajectory is 1, then make its color white
+    if white_out_singlets:
+        for traj_idx in range(locs[:,1].max()):
+            if (locs[:,1] == traj_idx).sum() == 1:
+                locs[(locs[:,1] == traj_idx), 4] = -1
+
     # Do the plotting
     colors = generate_rainbow_palette()
 
@@ -536,21 +643,24 @@ def overlay_trajs(
         locs_in_frame = locs[(locs[:,0] == frame_idx + start_frame).astype('bool'), :]
 
         for loc_idx in range(locs_in_frame.shape[0]):
+
+            # Get the color corresponding to this trajectory
+            color_idx = locs_in_frame[loc_idx, 4]
+            if color_idx == -1:
+                color = np.array([255, 255, 255, 255]).astype('uint8')
+            else:
+                color = colors[color_idx, :]
+
             try:
-                result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
-                    colors[locs_in_frame[loc_idx, 4], :]
+                result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color 
             except (KeyError, ValueError, IndexError) as e2: #edge loc
                 pass
             for j in range(1, crosshair_len + 1):
                 try:
-                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + j + upsampling_factor, :] = \
-                        colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] - j + upsampling_factor, :] = \
-                        colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2] + j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
-                        colors[locs_in_frame[loc_idx, 4], :]
-                    result[frame_idx, locs_in_frame[loc_idx, 2] - j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = \
-                        colors[locs_in_frame[loc_idx, 4], :]
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] + j + upsampling_factor, :] = color
+                    result[frame_idx, locs_in_frame[loc_idx, 2], M_up + locs_in_frame[loc_idx, 3] - j + upsampling_factor, :] = color
+                    result[frame_idx, locs_in_frame[loc_idx, 2] + j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color 
+                    result[frame_idx, locs_in_frame[loc_idx, 2] - j, M_up + locs_in_frame[loc_idx, 3] + upsampling_factor, :] = color
                 except (KeyError, ValueError, IndexError) as e3:  #edge loc 
                     continue 
 
@@ -566,27 +676,61 @@ def overlay_trajs(
 
 def overlay_trajs_interactive(
     nd2_file,
-    tracked_mat_file,
+    trajs,
     start_frame,
     stop_frame,
     vmax_mod = 1.0,
     upsampling_factor = 1,
     crosshair_len = 'dynamic',
-    continuous_update = True
+    continuous_update = True,
+    white_out_singlets = True,
 ):
-    out_tif = '%soverlay.tif' % tracked_mat_file.replace('Tracked.mat', '')
     if crosshair_len == 'dynamic':
         crosshair_len = int(3 * upsampling_factor)
-    overlay_trajs(
-        nd2_file,
-        tracked_mat_file,
-        start_frame,
-        stop_frame,
-        out_tif = out_tif,
-        vmax_mod = vmax_mod,
-        upsampling_factor = upsampling_factor,
-        crosshair_len = crosshair_len,
-    )
+
+    if type(trajs) == type('') and 'Tracked.mat' in trajs:
+        out_tif = '%soverlay.tif' % tracked_mat_file.replace('Tracked.mat', '')
+        overlay_trajs_tracked_mat(
+            nd2_file,
+            trajs,
+            start_frame,
+            stop_frame,
+            out_tif = out_tif,
+            vmax_mod = vmax_mod,
+            upsampling_factor = upsampling_factor,
+            crosshair_len = crosshair_len,
+            white_out_singlets = white_out_singlets,
+        )
+    elif type(trajs) == type('') and ('.trajs' in trajs or '.txt' in trajs):
+        out_tif = '%s_overlay.tif' % os.path.splitext(trajs)[0]
+        trajs, metadata = spazio.load_locs(trajs)
+        print(trajs.columns)
+        overlay_trajs_df(
+            nd2_file,
+            trajs,
+            start_frame,
+            stop_frame,
+            out_tif = out_tif,
+            vmax_mod = vmax_mod,
+            upsampling_factor = upsampling_factor,
+            crosshair_len = crosshair_len,
+            white_out_singlets = white_out_singlets,
+        )
+    elif type(trajs) == type(pd.DataFrame([])):
+        out_tif = 'default_overlay.tif'
+        overlay_trajs_df(
+            nd2_file,
+            trajs,
+            start_frame,
+            stop_frame,
+            out_tif = out_tif,
+            vmax_mod = vmax_mod,
+            upsampling_factor = upsampling_factor,
+            crosshair_len = crosshair_len,
+            white_out_singlets = white_out_singlets,
+        )
+    else:
+        raise RuntimeError('overlay_trajs_interactive: trajs argument not understood')
 
     reader = tifffile.TiffFile(out_tif)
     n_frames = len(reader.pages)
@@ -606,6 +750,67 @@ def overlay_trajs_interactive(
 
     interact(update, frame_idx = widgets.IntSlider(
         min=0, max=n_frames, continuous_update=continuous_update))
+
+def overlay_single_traj_interactive(
+    nd2_file,
+    trajs,
+    traj_idx,
+    vmax_mod = 1.0,
+    upsampling_factor = 1,
+    crosshair_len = 'dynamic',
+    continuous_update = True,
+):
+    '''
+    args
+        nd2_file        :   str
+        trajs           :   pandas.DataFrame
+        traj_idx        :   int
+        vmax_mod        :   float
+        upsampling_factor:  float
+        crosshair_len   :   str
+        continuous_update   :   bool
+    '''
+    if crosshair_len == 'dynamic':
+        crosshair_len = int(3 * upsampling_factor)
+
+    traj = trajs.loc[trajs['traj_idx'] == traj_idx]
+    start_frame = max([0, traj['frame_idx'].min() - 1])
+    stop_frame = min([trajs['frame_idx'].max(), traj['frame_idx'].max() + 1])
+
+    trajs_copy = trajs.copy()
+    trajs_copy.loc[trajs_copy['traj_idx'] != traj_idx, 'traj_idx'] = traj_idx + 100
+
+    out_tif = 'default_overlay.tif'
+    overlay_trajs_df(
+        nd2_file,
+        trajs_copy,
+        start_frame,
+        stop_frame,
+        out_tif = out_tif,
+        vmax_mod = vmax_mod,
+        upsampling_factor = upsampling_factor,
+        crosshair_len = crosshair_len,
+        white_out_singlets = True,
+    )
+    reader = tifffile.TiffFile(out_tif)
+    n_frames = len(reader.pages) - 1
+
+    def update(frame_idx):
+        fig, ax = plt.subplots(figsize = (14, 7))
+        page = reader.pages[frame_idx].asarray()
+        page[:,:,-1] = 255
+        ax.imshow(
+            page,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine_dir in ['top', 'bottom', 'left', 'bottom']:
+            ax.spines[spine_dir].set_visible(False)
+        plt.show(); plt.close()
+
+    interact(update, frame_idx = widgets.IntSlider(
+        min=0, max=n_frames, continuous_update=continuous_update))
+
 
 def overlay_locs_interactive(
     locs,
