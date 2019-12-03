@@ -15,6 +15,9 @@ import os
 import sys
 import tifffile
 
+# Plotting
+import matplotlib.pyplot as plt 
+
 # Hard copies
 from copy import copy 
 
@@ -22,6 +25,10 @@ from copy import copy
 from pyspaz import spazio
 from pyspaz import mask
 from pyspaz import utils 
+from pyspaz import visualize 
+
+# Progress bar
+from tqdm import tqdm 
 
 def compile_displacements(
     trajs,
@@ -104,6 +111,8 @@ def compile_displacements(
             histo, _edges = np.histogram(r_disps, bins = bin_edges)
             histograms[:, t-1] = histo.copy()
 
+        return histograms, bin_edges, df 
+
     # Otherwise need to deal with gaps
     else:
         # Collect all of the missing frames and add them as NaNs to
@@ -132,7 +141,7 @@ def compile_displacements(
             histo, _edges = np.histogram(r_disps, bins = bin_edges)
             histograms[:, t-1] = histo.copy()
 
-    return histograms, bin_edges 
+        return histograms, bin_edges, trajs_with_gaps 
 
 def compile_displacements_directory(
     loc_file_list,
@@ -140,7 +149,7 @@ def compile_displacements_directory(
 ):
     '''
     Compile radial displacement historams for a set of 
-    TXT files containing loclization/tracking information.
+    TXT files containing localization/tracking information.
 
     args
         loc_file_list   :   list of str, the paths to the TXT
@@ -179,11 +188,11 @@ def compile_displacements_directory(
     )
 
     # Compile radial displacement histograms
-    histograms, bin_edges = compile_displacements(
+    histograms, bin_edges, df = compile_displacements(
         df,
         **kwargs,
     )
-    return histograms, bin_edges 
+    return histograms, bin_edges, df
 
 def fit_radial_disp_model(
     radial_disp_histograms,
@@ -193,7 +202,9 @@ def fit_radial_disp_model(
     initial_guess_bounds = None,
     initial_guess_n = None,
     fit_bounds = None,
-    plot = False,
+    plot = True,
+    out_png = None,
+    pdf_plot_max_r = 2.0,
     **model_kwargs,
 ):
     '''
@@ -233,7 +244,7 @@ def fit_radial_disp_model(
     '''
     # Get the function corresponding to the model
     try:
-        model_f = MODELS[model]
+        model_f = MODELS[model]['cdf']
     except KeyError:
         raise RuntimeError('traj_analysis.fit_radial_disp_model: model %s ' \
             'not supported; available models are %s' % (model, ', '.join(MODELS)))
@@ -270,12 +281,58 @@ def fit_radial_disp_model(
         fit_bounds = fit_bounds,
     )
 
-    # Plot the result
+    # Plot, if desired
     if plot:
-        plot_radial_disps_with_model(
+
+        # Get the model PDF
+        model_f_pdf = MODELS[model]['pdf']
+        n_time_delays = radial_disp_histograms.shape[1]
+        model_pdf = np.zeros((5000, n_time_delays), dtype = 'float64')
+        model_cdf = np.zeros((5000, n_time_delays), dtype = 'float64')
+        model_bin_centers = np.zeros((5000, 2), dtype = 'float64')
+        model_bin_centers[:,0] = (bin_edges[:-1] + bin_edges[1:])/2
+        for dt_idx in range(n_time_delays):
+            model_bin_centers[:,1] = (dt_idx + 1) * delta_t 
+            model_pdf[:,dt_idx] = model_f_pdf(
+                model_bin_centers,
+                *popt,
+                **model_kwargs,
+            )
+            model_cdf[:,dt_idx] = model_f(
+                model_bin_centers,
+                *popt, 
+                **model_kwargs,
+            )
+
+        # Plot all model PDFs with the data
+        if type(out_png) == type(''):
+            out_png_pdf = '%s_pdf.png' % os.path.splitext(out_png)[0]
+            out_png_cdf = '%s_cdf.png' % os.path.splitext(out_png)[0]
+        else:
+            out_png_pdf = None 
+            out_png_cdf = None 
+
+        visualize.plot_pdf_with_model_from_histogram(
             radial_disp_histograms,
             bin_edges,
-            model_f,
+            model_pdf,
+            model_bin_centers[:,0],
+            delta_t,
+            max_r = pdf_plot_max_r,
+            exp_bin_size = 0.02,
+            figsize_mod = 1.0,
+            out_png = out_png_pdf,
+        )
+
+        visualize.plot_cdf_with_model_from_histogram(
+            radial_disp_histograms,
+            bin_edges,
+            model_cdf,
+            model_bin_centers[:,0],
+            delta_t,
+            color_palette = 'magma',
+            figsize_mod = 1.0,
+            out_png = out_png_cdf,
         )
 
     return popt 
@@ -283,7 +340,6 @@ def fit_radial_disp_model(
 # 
 # Fitting utilities
 #
-
 def _format_radial_disp_cdf(
     radial_disp_histograms,
     bin_edges,
@@ -387,7 +443,7 @@ def _fit_from_initial_guesses(
     def _model(r_dt, *args):
         return model_function(r_dt, *args, **model_kwargs)
 
-    for g_idx, guess in enumerate(initial_guesses):
+    for g_idx, guess in tqdm(enumerate(initial_guesses)):
         popt, pcov = curve_fit(
             _model,
             r_dt,
@@ -395,7 +451,7 @@ def _fit_from_initial_guesses(
             bounds = fit_bounds,
             p0 = guess,
         )
-        sum_sq_err[g_idx] = ((rad_disp_cdf(r_dt, *popt) - ext_cdf)**2).sum()
+        sum_sq_err[g_idx] = ((_model(r_dt, *popt) - ext_cdf)**2).sum()
 
     # Identify the guess with the minimum sum of squares
     m_idx = np.argmin(sum_sq_err)
@@ -416,7 +472,7 @@ def _fit_from_initial_guesses(
 # 
 # Model functions
 #
-def model_two_state_brownian_zcorr(
+def cdf_two_state_brownian_zcorr(
     r_dt,
     f_bound,
     d_free,
@@ -454,39 +510,87 @@ def model_two_state_brownian_zcorr(
 
     '''
     # 4 D t for the bound state 
-    var2_0 = 4 * d_bound * r_dt[:,1]
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + loc_error**2)
 
     # 4 D t for the free state
-    var2_1 = 4 * d_free * r_dt[:,1]
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + loc_error**2)
 
     # Squared radial displacement
     r2 = r_dt[:,0] ** 2
 
     # Correction for loss of free particles
     half_z = delta_z / 2
-    def _fraction_lost(z0, pos_var = var2_1[0]):
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
         return 0.5 * (gammaincc(0.5, (half_z-z0)**2 / pos_var) + \
             gammaincc(0.5, (half_z+z0)**2 / pos_var))
 
     unique_dts = np.unique(r_dt[:,1])
-    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    f1_corr = np.zeros(r_dt.shape[0], dtype='float64')
     for unique_dt in unique_dts:
         f_lost = quad(
             _fraction_lost,
             -half_z,
             half_z,
-            args = (4 * d_free * unique_dt),
+            args = (var2_1[r_dt[:,1]==unique_dt][0])
         )[0] / delta_z 
-        #f_lost = quad(_fraction_lost, -half_z, half_z)[0] / delta_z
-        f1_corr[r_dt[:,1]==unique_dt] = f_lost * (1-f_bound)
+        f1_corr[r_dt[:,1] == unique_dt] = (1-f_bound)*(1-f_lost) / (1-(1-f_bound)*f_lost)
 
-    return 1 - (1-f1_corr) * np.exp(-r2 / var2_0) - \
-        f1_corr * np.exp(-r2 / var2_1)
+    part_0 = np.exp(-r2 / var2_0)
+    part_1 = np.exp(-r2 / var2_1)
+    return 1 - (1-f1_corr)*part_0 - f1_corr*part_1
+
+def pdf_two_state_brownian_zcorr(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+    delta_z = 0.7,
+):
+    # 2 D t for bound state
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + (loc_error ** 2))
+
+    # 2 D t for free state
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + (loc_error ** 2))
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
+        return 0.5 * (gammaincc(0.5, (half_z-z0)**2 / pos_var) + \
+            gammaincc(0.5, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype='float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var2_1[r_dt[:,1]==unique_dt][0])
+        )[0] / delta_z 
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f_bound) * (1 - f_lost) / (1 - (1 - f_bound) * f_lost)
+
+    # Write out the PDF for each state, then add together
+    # to get the two-state PDF
+    pdf_0 = r_dt[:,0] * np.exp(-r2 / var2_0) / (0.5 * var2_0)
+    pdf_1 = r_dt[:,0] * np.exp(-r2 / var2_1) / (0.5 * var2_1)
+
+    return (1-f1_corr)*pdf_0 + f1_corr*pdf_1 
 
 
 # Models available for comparison
 MODELS = {
-    'two_state_brownian_zcorr' : model_two_state_brownian_zcorr,
+    'two_state_brownian_zcorr' : {
+        'cdf' : cdf_two_state_brownian_zcorr,
+        'pdf' : pdf_two_state_brownian_zcorr,
+    },
 }
 
 # Default fitting bounds for each model, if the user doesn't
@@ -494,13 +598,13 @@ MODELS = {
 DEFAULTS = {
     'two_state_brownian_zcorr' : {
         'initial_guess_bounds' : (
-            np.array([0, 0.0, 0.2]),
-            np.array([1.0, 0.05, 20.0]),
+            np.array([0, 0.2, 0.0]),
+            np.array([1.0, 20.0, 0.05]),
         ),
-        'initial_guess_n' : (10, 10, 10),
+        'initial_guess_n' : (5, 1, 5),
         'fit_bounds' : (
-            np.array([0.0, 0.0, 0.2]),
-            np.array([1.0, 0.05, 50.0]),
+            np.array([0.0, 0.2, 0.0]),
+            np.array([1.0, 50.0, 0.05]),
         ),
     }
 }

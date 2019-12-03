@@ -931,6 +931,318 @@ def plot_mask_interpolators(
     if finish_plot:
         plt.show(); plt.close()
 
+#
+# Visualize model fits to radial displacement histograms
+#
+def plot_radial_disps_with_model(
+    trajs,
+    model_pdf_support,
+    model_pdf,
+    model_cdf_support,
+    model_cdf,
+    dt = 0.00548, # sec
+    pdf_max_r = 2.0,
+    n_bins_pdf = 51,
+    n_bins_cdf = 5001,
+    time_delays = 4,
+    n_gaps = 0,
+    color_palette = 'magma',
+):
+    '''
+    Plot radial displacement CDFs with a model.
+
+    UNTESTED.
+
+
+    '''    
+    # Make the empirical radial displacement histograms
+    radial_disp_histograms_pdf, bin_edges_pdf = traj_analysis.compile_displacements(
+        trajs,
+        n_gaps = n_gaps,
+        time_delays = time_delays,
+        n_bins = n_bins_pdf,
+        max_disp = 5.0,
+        pixel_size_um = 0.16,
+        traj_col = 'traj_idx',
+        frame_col = 'frame_idx',
+        y_col = 'y_pixels',
+        x_col = 'x_pixels',
+    )
+    radial_disp_histograms_cdf, bin_edges_cdf = traj_analysis.compile_displacements(
+        trajs,
+        n_gaps = n_gaps,
+        time_delays = time_delays,
+        n_bins = n_bins_cdf,
+        max_disp = 5.0,
+        pixel_size_um = 0.16,
+        traj_col = 'traj_idx',
+        frame_col = 'frame_idx',
+        y_col = 'y_pixels',
+        x_col = 'x_pixels',
+    )
+
+    # Get the size of the empirical radial displacement bins to plot
+    exp_bin_size = bin_edges_pdf[1] - bin_edges_pdf[0]
+    exp_bar_width = exp_bin_size * 0.8
+    exp_bin_centers = bin_edges_pdf[:-1] + exp_bin_size/2
+
+    # Get the size of the model bins, and figure out the inflation factor
+    # for model vs. empirical
+    model_bin_size_pdf = model_pdf_support[1] - model_pdf_support[0]
+    pdf_inflation_factor = model_bin_size_pdf / exp_bin_size 
+    model_pdf_inflated = model_pdf * pdf_inflation_factor 
+
+    # Plot each time delay as a separate PDF
+    fig, ax = plt.subplots(time_delays, 1, figsize = (2.8, 0.9 * time_delays))
+    palette = sns.color_palette(color_palette, time_delays)
+
+    for dt_idx in range(time_delays):
+        exp_pdf = radial_disp_histograms[:, dt_idx] / radial_disp_histograms[:, dt_idx].sum()
+        ax[dt_idx].bar(
+            exp_bin_centers,
+            exp_pdf,
+            color = palette[dt_idx],
+            edgecolor = 'black',
+            linewidth = 1,
+            width = exp_bar_width,
+            label = None,
+        )
+        ax[dt_idx].plot(
+            model_pdf_support,
+            model_pdf_inflated,
+            linestyle = '-',
+            linewidth = 1.5,
+            color = 'k',
+            label = None,
+        )
+        ax[dt_idx].plot(
+            [], [], linestyle = '',
+            marker = None, color = 'w',
+            label = '$\Delta t = $%.4f sec' % ((dt_idx + 1) * dt)
+        )
+        ax[dt_idx].legend(frameon=False, prop={'size':6}, loc='upper right')
+        ax[dt_idx].set_yticks([])
+        if dt_idx != time_delays-1:
+            for spine_dir in ['top', 'bottom', 'left', 'right']:
+                ax[dt_idx].spines[spine_dir].set_visible(False)
+            ax[dt_idx].set_xticks([])
+
+        ax[dt_idx].set_xlim((0, pdf_max_r))
+    ax[-1].set_xlabel('Radial displacement ($\mu$m)', fontsize = 10)
+
+    if out_png != None:
+        wrapup(out_png, dpi=600)
+    else:
+        plt.tight_layout(); plt.show(); plt.close()
+
+
+def plot_pdf_with_model_from_histogram(
+    radial_disp_histograms,
+    histogram_bin_edges,
+    model_pdf,
+    model_bin_centers,
+    dt,
+    max_r = 2.0,
+    exp_bin_size = 0.02,
+    out_png = None,
+    color_palette = 'magma',
+    figsize_mod = 1.0,
+):
+    '''
+    Plot the radial displacement histograms of tracking data 
+    alongside the model PDF.
+
+    args
+        radial_disp_histograms      :   2D ndarray of shape (n_bins, n_dt)
+
+        histogram_bin_edges         :   1D ndarray of shape (n_bins_1,)
+
+        model_pdf                   :   2D ndarray of shape (m, n_dt)
+
+        model_bin_centers           :   1D ndarray of shape (m,)
+
+        dt                          :   float, seconds between frames
+
+        max_r                       :   float, maximum disp to show in um
+
+        exp_bin_size                :   float, size of plot histogram bins
+                                            in um. Must be larger than the
+                                            bins in *histogram_bin_edges*
+
+        out_png                     :   str, file to save plot to
+
+        color_palette               :   str
+
+    returns
+        None
+
+    '''
+    # Check user inputs
+    assert len(radial_disp_histograms.shape) == 2
+    assert len(histogram_bin_edges.shape) == 1
+    assert len(model_pdf.shape) == 2
+    assert len(model_bin_centers.shape) == 1
+    assert radial_disp_histograms.shape[1] == model_pdf.shape[1]
+    assert model_pdf.shape[0] == model_bin_centers.shape[0]
+
+    # Get bar graph parameters
+    n_bins, n_dt = radial_disp_histograms.shape 
+    exp_bin_size_orig = histogram_bin_edges[1] - histogram_bin_edges[0]
+    model_bin_size = model_bin_centers[1] - model_bin_centers[0]
+
+    # The number of original bins per plot bin
+    aggregation_factor = int(exp_bin_size / exp_bin_size_orig)
+    n_bins_plot = radial_disp_histograms.shape[0] // aggregation_factor
+
+    new_displacements = np.zeros((n_bins_plot, n_dt), dtype = 'int64')
+    for dt_idx in range(n_dt):
+        for agg_idx in range(aggregation_factor):
+            new_displacements[:, dt_idx] = new_displacements[:, dt_idx] + radial_disp_histograms[agg_idx::aggregation_factor, dt_idx]
+    new_bin_edges = histogram_bin_edges[::aggregation_factor]
+
+    exp_bar_width = exp_bin_size * 0.8
+    exp_bin_centers = new_bin_edges[:-1] + exp_bin_size/2
+    model_inflation_factor = exp_bin_size 
+
+
+    fig, ax = plt.subplots(n_dt, 1, figsize = (2.8 * figsize_mod, 0.9 * n_dt * figsize_mod))
+    palette = sns.color_palette(color_palette, n_dt)
+    for dt_idx in range(n_dt):
+        exp_pdf = new_displacements[:, dt_idx] / new_displacements[:, dt_idx].sum()
+        ax[dt_idx].bar(
+            exp_bin_centers[:n_bins_plot],
+            exp_pdf[:n_bins_plot],
+            color = palette[dt_idx],
+            edgecolor = 'black',
+            linewidth = 1,
+            width = exp_bar_width,
+            label = None,
+        )
+        ax[dt_idx].plot(
+            model_bin_centers,
+            model_pdf[:, dt_idx] * model_inflation_factor,
+            linestyle = '-',
+            linewidth = 1.5,
+            color = 'k',
+            label = None,
+        )
+        ax[dt_idx].plot([], [], linestyle = '',
+            marker = None, color = 'w', label = '$\Delta t = $%.4f sec' % ((dt_idx + 1) * dt))
+
+        ax[dt_idx].legend(frameon=False, prop={'size':6}, loc='upper right')
+        ax[dt_idx].set_yticks([])
+        if dt_idx != n_dt-1:
+            for spine_dir in ['top', 'left', 'right']:
+                ax[dt_idx].spines[spine_dir].set_visible(False)
+            ax[dt_idx].set_xticks([])
+        else:
+            for spine_dir in ['top', 'left', 'right']:
+                ax[dt_idx].spines[spine_dir].set_visible(False)
+        ax[dt_idx].set_xlim((0, max_r))
+    ax[-1].set_xlabel('Radial displacement ($\mu$m)', fontsize = 10)
+
+    if out_png != None:
+        wrapup(out_png, dpi = 600)
+    else:
+        plt.tight_layout(); plt.show(); plt.close()
+
+def plot_cdf_with_model_from_histogram(
+    radial_disp_histograms,
+    histogram_bin_edges,
+    model_cdf,
+    model_bin_rights,
+    dt,
+    out_png = None,
+    color_palette = 'magma',
+    figsize_mod = 1.0,
+):
+    '''
+    Plot the empirical distribution functions for radial displacements
+    in tracking data alongside the model CDF.
+
+    args
+        radial_disp_histograms      :   2D ndarray of shape (n_bins, n_dt)
+
+        histogram_bin_edges         :   1D ndarray of shape (n_bins_1,)
+
+        model_pdf                   :   2D ndarray of shape (m, n_dt)
+
+        model_bin_centers           :   1D ndarray of shape (m,)
+
+        dt                          :   float, seconds between frames
+
+        out_png                     :   str, file to save plot to
+
+        color_palette               :   str
+
+    returns
+        None
+
+    '''
+    n_bins, n_dt = radial_disp_histograms.shape 
+    bins_right = histogram_bin_edges[1:]
+
+    assert n_bins == bins_right.shape[0]
+
+    experiment_cdfs = np.zeros(radial_disp_histograms.shape, dtype = 'float64')
+    for dt_idx in range(n_dt):
+        experiment_cdfs[:, dt_idx] = np.cumsum(radial_disp_histograms[:, dt_idx])
+        experiment_cdfs[:, dt_idx] = experiment_cdfs[:, dt_idx] / experiment_cdfs[-1, dt_idx]
+
+    fig, ax = plt.subplots(2, 1, figsize = (3 * figsize_mod, 3 * figsize_mod),
+        gridspec_kw = {'height_ratios' : [3, 1]},
+        sharex = True,
+    )
+    palette = sns.color_palette(color_palette, n_dt)
+
+    for dt_idx in range(n_dt):
+        ax[0].plot(
+            bins_right,
+            experiment_cdfs[:, dt_idx],
+            color = palette[dt_idx],
+            linestyle = '-',
+            label = '%.4f sec ' % ((dt_idx+1) * dt),
+        )
+        ax[0].plot(
+            model_bin_rights,
+            model_cdf[:, dt_idx],
+            color = 'k',
+            linestyle = '--',
+            label = None,
+        )
+    ax[0].plot([], [], color = 'k', linestyle = '--', label = 'Model')
+    ax[0].set_ylabel('CDF', fontsize = 12)
+    ax[0].legend(frameon=False, prop={'size' : 6})
+
+    # Currently the experimental CDFs must be the same shape
+    # as the model CDF in order to subtract the two 
+    residuals = experiment_cdfs - model_cdf 
+
+    for dt_idx in range(n_dt):
+        ax[1].plot(
+            bins_right,
+            residuals[:, dt_idx],
+            color = palette[dt_idx],
+            linestyle = '-',
+            label = '%.4f sec' % ((dt_idx+1) * dt),
+            linewidth = 1,
+        )
+    ax[1].set_xlabel('Radial displacement ($\mu$m)', fontsize = 12)
+    ax[1].set_ylabel('Residuals', fontsize = 12)
+
+    ax1_ylim = np.abs(residuals).max() * 1.5
+    ax[1].set_ylim((-ax1_ylim, +ax1_ylim))
+    fig.align_ylabels(ax)
+    if out_png != None:
+        wrapup(out_png, dpi = 600)
+    else:
+        plt.tight_layout(); plt.show(); plt.close()
+
+
+
+
+
+
 # 
 # Various low-level utilities
 #
