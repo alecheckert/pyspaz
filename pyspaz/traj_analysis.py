@@ -320,7 +320,7 @@ def fit_radial_disp_model(
             delta_t,
             max_r = pdf_plot_max_r,
             exp_bin_size = 0.02,
-            figsize_mod = 1.0,
+            figsize_mod = 2.0,
             out_png = out_png_pdf,
         )
 
@@ -331,7 +331,7 @@ def fit_radial_disp_model(
             model_bin_centers[:,0],
             delta_t,
             color_palette = 'magma',
-            figsize_mod = 1.0,
+            figsize_mod = 2.0,
             out_png = out_png_cdf,
         )
 
@@ -425,6 +425,7 @@ def _fit_from_initial_guesses(
 
     '''
     # Generate the array of initial guesses
+    m = len(initial_guess_bounds[0])
     lower_bounds = np.array(initial_guess_bounds[0])
     upper_bounds = np.array(initial_guess_bounds[1])
     initial_guesses = utils.cartesian_product(
@@ -432,7 +433,7 @@ def _fit_from_initial_guesses(
             lower_bounds[i],
             upper_bounds[i],
             initial_guess_n[i]
-        ) for i in range(3))
+        ) for i in range(m))
     )
     n_guesses = initial_guesses.shape[0]
 
@@ -584,6 +585,148 @@ def pdf_two_state_brownian_zcorr(
 
     return (1-f1_corr)*pdf_0 + f1_corr*pdf_1 
 
+def cdf_two_state_brownian_zcorr_gapless(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+    delta_z = 0.7,
+):
+    '''
+    CDF for the radial displacements of a two-state Brownian
+    particle without state transitions. Only displacements
+    in a thin axial slice of thickness *delta_z* are observed.
+
+    args
+        r_dt                :   2D ndarray of shape (n_points, 2),
+                                    the right radial displacement bins
+                                    and frame intervals for each data point
+
+        f_bound             :   float, fraction of molecules in 
+                                    the slower-moving (`bound`) state
+
+        d_free              :   float, diffusion coefficient for 
+                                    free state in um^2 s^-1
+
+        d_bound             :   float, diffusion coefficient for
+                                    bound state in um^2 s^-1
+
+        loc_error           :   float, localization error in um
+
+        delta_z             :   float, the thickness of the axial
+                                    detection/observation slice in um
+
+    returns
+        1D ndarray, the model CDF at the points indicated by 
+            r_dt
+
+    '''
+    # 4 D t for the bound state 
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + loc_error**2)
+
+    # 4 D t for the free state
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + loc_error**2)
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
+        return 0.5 * (gammaincc(0.5, (half_z-z0)**2 / pos_var) + \
+            gammaincc(0.5, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype='float64')
+    min_dt = unique_dts.min()
+    f_remain_base = 1.0 - quad(
+        _fraction_lost,
+        -half_z,
+        half_z,
+        args = (2 * (2 * d_free * min_dt)),
+    )[0] / delta_z 
+    for unique_dt in unique_dts:
+        f_remain = f_remain_base ** int(round((unique_dt / min_dt), 0)) 
+        f1_corr[r_dt[:,1] == unique_dt] = (1-f_bound)*f_remain / (1-(1-f_bound)*(1-f_remain))
+
+    part_0 = np.exp(-r2 / var2_0)
+    part_1 = np.exp(-r2 / var2_1)
+    return 1 - (1-f1_corr)*part_0 - f1_corr*part_1
+
+def pdf_two_state_brownian_zcorr_gapless(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+    delta_z = 0.7,
+):
+    # 2 D t for bound state
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + (loc_error ** 2))
+
+    # 2 D t for free state
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + (loc_error ** 2))
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
+        return 0.5 * (gammaincc(0.5, (half_z-z0)**2 / pos_var) + \
+            gammaincc(0.5, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype='float64')
+    min_dt = unique_dts.min()
+    f_remain_base = 1.0 - quad(
+        _fraction_lost,
+        -half_z,
+        half_z,
+        args = (2 * (2 * d_free * min_dt)),
+    )[0] / delta_z 
+    for unique_dt in unique_dts:
+        f_remain = f_remain_base ** int(round((unique_dt / min_dt), 0)) 
+        f1_corr[r_dt[:,1] == unique_dt] = (1-f_bound)*f_remain / (1-(1-f_bound)*(1-f_remain))
+
+    # Write out the PDF for each state, then add together
+    # to get the two-state PDF
+    pdf_0 = r_dt[:,0] * np.exp(-r2 / var2_0) / (0.5 * var2_0)
+    pdf_1 = r_dt[:,0] * np.exp(-r2 / var2_1) / (0.5 * var2_1)
+
+    return (1-f1_corr)*pdf_0 + f1_corr*pdf_1 
+
+def cdf_one_state_brownian(
+    r_dt,
+    d,
+    loc_error = 0.035,
+):
+    # 2 D t
+    var2 = 2 * (2 * d * r_dt[:,1] + loc_error**2)
+
+    # Squared radial displacement
+    r2 = r_dt[:,0]**2
+
+    return 1.0 - np.exp(-r2 / var2)
+
+def pdf_one_state_brownian(
+    r_dt,
+    d,
+    loc_error = 0.035,
+):
+    # 2 D t
+    var2 = 2 * (2 * d * r_dt[:,1] + loc_error**2)
+
+    # Squared radial displacement
+    r2 = r_dt[:,0]**2
+
+    return r_dt[:,0] * np.exp(-r2 / var2) / (0.5 * var2)
+
 
 # Models available for comparison
 MODELS = {
@@ -591,6 +734,14 @@ MODELS = {
         'cdf' : cdf_two_state_brownian_zcorr,
         'pdf' : pdf_two_state_brownian_zcorr,
     },
+    'two_state_brownian_zcorr_gapless' : {
+        'cdf' : cdf_two_state_brownian_zcorr_gapless,
+        'pdf' : pdf_two_state_brownian_zcorr_gapless,
+    },
+    'one_state_brownian' : {
+        'cdf' : cdf_one_state_brownian,
+        'pdf' : pdf_one_state_brownian,
+    }
 }
 
 # Default fitting bounds for each model, if the user doesn't
@@ -606,7 +757,29 @@ DEFAULTS = {
             np.array([0.0, 0.2, 0.0]),
             np.array([1.0, 50.0, 0.05]),
         ),
-    }
+    },
+    'two_state_brownian_zcorr_gapless' : {
+        'initial_guess_bounds' : (
+            np.array([0, 0.2, 0.0]),
+            np.array([1.0, 20.0, 0.05]),
+        ),
+        'initial_guess_n' : (5, 1, 5),
+        'fit_bounds' : (
+            np.array([0.0, 0.2, 0.0]),
+            np.array([1.0, 50.0, 0.05]),
+        ),
+    },
+    'one_state_brownian' : {
+        'initial_guess_bounds' : (
+            np.array([0]),
+            np.array([30.0]),
+        ),
+        'initial_guess_n' : np.array([20]),
+        'fit_bounds' : (
+            np.array([0.0]),
+            np.array([100.0]),
+        ),
+    },
 }
 
 
