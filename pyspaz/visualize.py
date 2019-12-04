@@ -812,7 +812,6 @@ def overlay_locs_interactive(
     locs,
     nd2_file,
     vmax_mod = 0.5,
-    dpi = 20,
     continuous_update = False,
 ):
     # Load the ND2 file
@@ -826,23 +825,25 @@ def overlay_locs_interactive(
 
     # Define the update function
     def update(frame_idx):
-        fig, ax = plt.subplots(figsize = (8, 8))
-        ax.imshow(
-            reader.get_frame(frame_idx),
-            cmap = 'gray',
-            vmin = vmin,
-            vmax = vmax,
-        )
-        ax.plot(
+        fig, ax = plt.subplots(1, 2, figsize = (12, 6))
+        for j in range(2):
+            ax[j].imshow(
+                reader.get_frame(frame_idx),
+                cmap = 'gray',
+                vmin = vmin,
+                vmax = vmax,
+            )
+        ax[1].plot(
             locs.loc[locs['frame_idx'] == frame_idx]['x_pixels'] - 0.5,
             locs.loc[locs['frame_idx'] == frame_idx]['y_pixels'] - 0.5,
-            marker = '.',
+            marker = '+',
             markersize = 15,
-            color = 'r',
+            color = '#F70000',
             linestyle = '',
         )
-        ax.set_xticks([])
-        ax.set_yticks([])
+        for j in range(2):
+            ax[j].set_xticks([])
+            ax[j].set_yticks([])
         plt.show(); plt.close()
 
     interact(update, frame_idx = widgets.IntSlider(

@@ -36,19 +36,8 @@ from tqdm import tqdm
 def track_locs_directory(
     directory_name,
     out_dir = None,
-    d_max = 20.0,
-    d_bound_naive = 0.1,
-    out_file = None,
-    search_exp_fac = 3,
-    pixel_size_um = 0.16,
-    frame_interval_sec = 0.00548,
-    min_int = 0.0,
-    max_blinks = 0,
-    k_return_from_blink = 1.0,
-    y_int = 0.5,
-    y_diff = 0.9,
-    start_frame = None,
-    stop_frame = None,
+    output_format = 'txt',
+    **kwargs
 ):
     '''
     Track all of the *.locs files in a given directory.
@@ -56,34 +45,36 @@ def track_locs_directory(
     If *out_dir* is None, the resulting *Tracked.mat files
     are placed in the same directory as the localizations.
 
+    args
+        directory_name          :   str, with locs files
+        out_dir                 :   str, for output files
+        kwargs                  :   for track_locs()
+
+    returns
+        None
+
     '''
+    assert output_format in OUTPUT_FORMATS
+    
+    kwargs['output_format'] = output_format 
     loc_files = glob("%s/*.locs" % directory_name)
+
     if out_dir == None:
-        out_files = [i.replace('.locs', '_Tracked.mat') \
-            for i in loc_files]
-    else:
-        if not os.path.isdir(out_dir):
-            os.mkdir(out_dir)
-        out_files = ['%s/%s' % (out_dir, \
-            i.split('/')[-1].replace('.locs', '_Tracked.mat')) \
-            for i in loc_files]
+        out_dir = directory_name
+
+    if output_format == 'mat':
+        file_suffix = '_Tracked.mat'
+    elif output_format == 'txt':
+        file_suffix = '.trajs'
+    
+    out_files = ['%s/%s' % (out_dir, i.split('/')[-1].replace('.locs', file_suffix)) \
+        for i in loc_files]
 
     for f_idx, fname in enumerate(loc_files):
         track_locs(
             fname,
             out_file = out_files[f_idx],
-            d_max = d_max,
-            d_bound_naive = d_bound_naive,
-            search_exp_fac = search_exp_fac,
-            pixel_size_um = pixel_size_um,
-            frame_interval_sec = frame_interval_sec,
-            min_int = min_int,
-            max_blinks = max_blinks,
-            k_return_from_blink = k_return_from_blink,
-            y_int = y_int,
-            y_diff = y_diff,
-            start_frame = start_frame,
-            stop_frame = stop_frame,
+            **kwargs,
         )
 
 OUTPUT_FORMATS = [
@@ -115,6 +106,69 @@ def track_locs(
     output_format = 'txt',
     algorithm_type = 'full',
 ):
+    '''
+    Main tracking function for localizations.
+
+    args
+        loc_file            :   str, the TXT file with localization info,
+                                    for instance output of
+                                    localize.detect_and_localize_file
+
+        out_file            :   str, output filename
+
+        d_max               :   float, maximum expected diffusion coefficient
+                                    in um^2 s^-1
+
+        d_bound_naive       :   float, the naive estimate for the "bound"
+                                    diffusion coefficient in um^2 s^-1
+
+        search_exp_fac      :   float, the expansion factor for the reconnection
+                                    search radius
+
+        pixel_size_um       :   float, size of camera pixels in um
+
+        frame_interval_sec  :   float, the frame interval in seconds
+
+        min_int             :   float, the minimum intensity in photons 
+                                    required for a localization to start a
+                                    new trajectory
+
+        max_blinks          :   int, the maximum tolerated number of gaps
+                                    in tracking
+
+        k_return_from_blink :   float, the rate constant governing the penalty
+                                    for reconnecting to gapped trajectories
+
+        y_int               :   float, weight in the intensity law for the 'full'
+                                    algorithm algorithm
+
+        y_diff              :   float, weight between the maximum and local
+                                    diffusion coefficients in the diffusion
+                                    part of the reconnection method
+
+        start_frame         :   int, the frame at which to start tracking
+
+        stop_frame          :   int, the frame at which to stop tracking
+
+        output_format       :   str, 'txt' or 'mat'
+
+        algorithm_type      :   str, one of ALGORITHM_TYPES, the behavior
+                                    when encountering ambiguity
+
+    returns
+        (
+            pandas.DataFrame or ndarray, the trajectories in either *.trajs
+                or *Tracked.mat format (as specified by *output_format*);
+
+            dict, updated metadata;
+
+            list of str, the names of the trajectory columns (useful
+                for *Tracked.mat, redundant for *.trajs);
+
+        )
+
+
+    '''
     # Check that user has specified compatible file formats 
     if output_format not in OUTPUT_FORMATS:
         raise RuntimeError('track.track_locs: output format %s not supported; use one of %s' % (output_format, ', '.join(OUTPUT_FORMATS)))
@@ -619,6 +673,23 @@ def _assign_diffusion_only(
     y_diff = 0.9,
     max_blinks = 0,
 ):
+    '''
+    Tracking subproblem reconnection method that relies only
+    on diffusion (distance between trajectories and localizations)
+    and blinking.
+
+    args
+        trajectories    :   list of Trajectory
+        localizations   :   2D ndarray
+        **kwargs
+
+    returns
+        (
+            list of Trajectory, active trajectories;
+            list of Trajectory, terminated trajectories;
+        )
+
+    '''
     # Get the size of the subproblem - the number of competing trajectories
     # and/or localizations
     n_trajs = len(trajectories)

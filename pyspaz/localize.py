@@ -24,6 +24,7 @@ from mpl_toolkits.mplot3d import axes3d
 
 # Frame counter
 from tqdm import tqdm
+import time 
 
 # The radial symmetry method involves a possible divide-by-zero that
 # is subsequently corrected. The divide-by-zero warnings are 
@@ -35,6 +36,13 @@ import os
 
 # Utility functions for localization
 from . import utils 
+
+# # Parallelization
+import dask 
+# from dask.distributed import Client, progress 
+# from dask.diagnostics import ProgressBar 
+# client = Client(n_workers = 8, threads_per_worker = 1)
+
 
 def radial_symmetry(psf_image):
     '''
@@ -378,16 +386,14 @@ def localize_frame(
             du_dI0 = E_y * E_x 
             du_dbg = np.ones((window_size, window_size), dtype = 'float64')
 
-            # Determine the gradient of the log-likelihood at the current parameter vector.
-            # See the common structure of this term in section (1) of this notebook.
+            # Calculate the gradient of the log-likelihood at the current parameter vector
             J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
             grad[0] = (du_dy[nonzero] * J_factor).sum()
             grad[1] = (du_dx[nonzero] * J_factor).sum()
             grad[2] = (du_dI0[nonzero] * J_factor).sum()
             grad[3] = (du_dbg[nonzero] * J_factor).sum()
 
-            # Determine the Hessian. See the common structure of these terms
-            # in section (1) of this notebook.
+            # Calculate the Hessian
             H_factor = psf_image[nonzero] / (model[nonzero]**2)
             H[0,0] = (-H_factor * du_dy[nonzero]**2).sum()
             H[0,1] = (-H_factor * du_dy[nonzero]*du_dx[nonzero]).sum()
@@ -408,9 +414,7 @@ def localize_frame(
             H[3,1] = H[1,3]
             H[3,2] = H[2,3]
 
-            # Invert the Hessian. Here, we may need to stabilize the Hessian by adding
-            # a ridge term. We'll increase this ridge as necessary until we can actually
-            # invert the matrix.
+            # Invert the Hessian, stably
             Y = np.diag([1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5])
             if enforce_negative_definite:
                 while 1:
@@ -441,7 +445,7 @@ def localize_frame(
             pars = pars + update 
             iter_idx += 1
 
-        # If the estimate has diverged, fall back to the initial guess.
+        # If the estimate has diverged, fall back to the initial guess
         if any(np.abs(update[:2]) >= divergence_crit):
             pars = init_pars
         if  ~check_pos_inside_window(pars[:2], window_size, edge_tolerance = 2):
@@ -449,7 +453,7 @@ def localize_frame(
         else:
             # Correct for the half-pixel indexing error that results from
             # implicitly assigning intensity values to the corners of pixels
-            # in the MLE method
+            # in the PSF definition
             pars[:2] = pars[:2] + 0.5
 
         # Give the resulting y, x coordinates in terms of the whole image
@@ -547,6 +551,8 @@ def detect_and_localize_file(
     calculate_error = True,
     start_frame = None,
     stop_frame = None,
+    frames_to_do = None,
+    progress_bar = True,
 ):
     '''
     Detect and localize Gaussian spots in every frame of a single
@@ -689,7 +695,10 @@ def detect_and_localize_file(
     c_idx = 0
     
     # Iterate through the frames
-    for frame_idx in tqdm(range(start_frame, stop_frame+1)):
+    if type(frames_to_do) != type(np.array([])):
+        frames_to_do = list(range(start_frame, stop_frame + 1))
+
+    for frame_idx in tqdm(frames_to_do, disable = ~progress_bar):
         
         # Get the image corresponding to this frame from the reader
         image = reader.get_frame(frame_idx).astype('float64')
@@ -999,6 +1008,9 @@ def detect_and_localize_file(
         'image_file_path' : os.path.abspath(file_name),
     }
 
+    # Close the reader
+    reader.close()
+
     # If desired, save to a file
     if save:
         if type(out_txt) == type(''):
@@ -1025,28 +1037,71 @@ def detect_and_localize_file(
 
 def detect_and_localize_file_parallelized(
     file_name,
-    n_workers = 8,
-    n_threads = 8,
-    sigma = 1.0,
+    dask_client,
     out_txt = None,
-    out_dir = None,
-    window_size = 9,
-    detect_threshold = 20.0,
-    damp = 0.2,
-    camera_bg = 0,
-    camera_gain = 1,
-    max_iter = 20,
-    plot = False,
-    initial_guess = 'radial_symmetry',
-    convergence_crit = 3.0e-4,
-    divergence_crit = 1.0,
-    max_locs = 1000000,
-    enforce_negative_definite = False,
-    verbose = True,
+    verbose_times = False,
+    **kwargs,
 ):
-    # Assign each worker a specific frame range
-    raise NotImplementedError
-    
+    '''
+    Run parallelelized detection and localization on a single
+    image.
+
+    args
+        file_name       :   str, image filename
+        dask_client     :   dask.distributed.Client, the parallelizer
+        out_txt         :   str, file to save to
+        kwargs          :   for detect_and_localize_file()
+
+    returns
+        (
+            pandas.DataFrame, the localizations;
+            dict; the metadata;
+        )
+
+    '''
+    # Get the number of workers for this dask client
+    n_workers = len(dask_client.scheduler_info()['workers'])
+
+    kwargs['verbose'] = False
+    kwargs['progress_bar'] = False
+    kwargs['start_frame'] = None
+    kwargs['stop_frame'] = None 
+    kwargs['save'] = False 
+
+    reader = spazio.ImageFileReader(file_name)
+    N, M, n_frames = reader.get_shape()
+    reader.close()
+
+    # Divide the list of all frames into ranges that will be
+    # given to each individual worker
+    frames = np.arange(n_frames)
+    frame_ranges = [frames[i::n_workers] for i in range(n_workers)]
+
+    # Assign each frame range to a worker
+    results = []
+    for frame_range_idx, frame_range in enumerate(frame_ranges):
+        kwargs['frames_to_do'] = frame_range 
+        result_df_metadata = dask.delayed(detect_and_localize_file)(file_name, **kwargs)
+        results.append(result_df_metadata)
+
+    t0 = time.time()
+    out_tuples = dask_client.compute(results)
+    out_tuples = [i.result() for i in out_tuples]
+    t1 = time.time()
+    if verbose_times: print('Run time: %.2f sec' % (t1 - t0))
+
+    metadata = out_tuples[0][1]
+    locs = pd.concat(
+        [out_tuples[i][0] for i in range(len(out_tuples))],
+        ignore_index = True, sort = False,
+    )
+    locs = locs.sort_values(by = 'frame_idx')
+    locs.index = np.arange(len(locs))
+
+    if out_txt != None:
+        spazio.save_locs(out_txt, locs, metadata)
+
+    return locs, metadata
 
 def check_pos_inside_window(pos_vector, window_size, edge_tolerance = 3):
     '''
@@ -1066,9 +1121,9 @@ def detect_and_localize_directory(
     damp = 0.2,
     camera_bg = 470,
     camera_gain = 110,
-    max_iter = 10,
+    max_iter = 20,
     initial_guess = 'radial_symmetry',
-    convergence_crit = 1.0e-3,
+    convergence_crit = 3.0e-4,
     divergence_crit = 1.0,
     max_locs = 2000000,
     enforce_negative_definite = False,
@@ -1153,6 +1208,58 @@ def detect_and_localize_directory(
             verbose = verbose,
         )
 
+def detect_and_localize_directory_parallelized(
+    directory_name,
+    dask_client,
+    out_dir = None,
+    verbose_times = True,
+    suffixes_to_seek = ['.nd2'],
+    **kwargs
+):
+    '''
+    Parallelized localization of spots in all image files
+    in the passed directory. Out file names are automatically
+    generated.
+
+    args
+        directory_name          :   str, directory with image files
+        dask_client             :   dask.distributed.Client, the 
+                                        parallelizer
+        out_dir                 :   str, directory in which to save files
+        verbose_times           :   bool, show the time to localize each file
+        suffixes_to_seek        :   list of str, the suffixes of the image
+                                        files (e.g. ['.nd2', '.tif'])
+        **kwargs                :   keyword arguments for detect_and_localize_file
+
+    returns
+        None
+
+    '''
+    # Get the list of input image filenames
+    file_list = []
+    for suffix in suffixes_to_seek:
+        file_list = file_list + glob("%s/*%s" % (directory_name, suffix))
+
+    # Construct the output locations
+    if out_dir == None:
+        out_txt_list = ['%s.locs' % os.path.splitext(fname)[0] \
+            for fname in file_list]
+    else:
+        if not os.path.isdir(out_dir):
+            os.mkdir(out_dir)
+        out_txt_list = ['%s/%s' % (out_dir, fname.split('/')[-1].replace('.nd2', '.locs')) \
+            for fname in file_list]
+
+    # Run detection/localization on each target file
+    for f_idx, f_name in enumerate(file_list):
+        df, metadata = detect_and_localize_file_parallelized(
+            f_name,
+            dask_client,
+            out_txt = out_txt_list[f_idx],
+            verbose_times = verbose_times,
+            **kwargs,
+        )
+        if verbose_times: print('Finished with %s' % f_name)
 # 
 # More customized particle detection functions
 #
