@@ -1,6 +1,6 @@
 # pyspaz
 
-`pyspaz` is a module for analyzing live cell single molecule tracking data. The package includes localization, tracking, visualization, and analysis utilities.
+`pyspaz` is a module for analyzing live cell single molecule tracking data. The package includes localization, tracking, visualization, masking, quality control, and analysis utilities.
 
 As `pyspaz` is still in active development, the recommended means of installation is
 
