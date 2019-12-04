@@ -92,6 +92,7 @@ OUTPUT_FORMATS = [
 ]
 ALGORITHM_TYPES = [
     'full',
+    'diffusion_only',
     'conservative',
     'equal_size',
 ]
@@ -306,7 +307,7 @@ def track_locs(
             # solves individual subgraph problems with the Hungarian algorithm
             else:
                 if algorithm_type == 'full':
-                    running_trajectories, finished_trajectories = assign_full(
+                    running_trajectories, finished_trajectories = _assign_full(
                         [active_trajectories[i] for i in y_index_lists[subgraph_idx]],
                         frame_locs[x_index_lists[subgraph_idx], :],
                         mean_spot_intensity,
@@ -318,6 +319,22 @@ def track_locs(
                         y_int = y_int,
                         y_diff = y_diff,
                         max_blinks = max_blinks,
+                    )
+                    for trajectory in running_trajectories:
+                        new_trajectories.append(copy(trajectory))
+                    for trajectory in finished_trajectories:
+                        completed_trajectories.append(copy(trajectory))
+
+                elif algorithm_type == 'diffusion_only':
+                    running_trajectories, finished_trajectories = _assign_diffusion_only(
+                        [active_trajectories[i] for i in y_index_lists[subgraph_idx]],
+                        frame_locs[x_index_lists[subgraph_idx], :],
+                        frame_interval_sec = frame_interval_sec,
+                        sig2_bound_naive = sig2_bound_naive,
+                        sig2_free = sig2_free,
+                        k_return_from_blink = k_return_from_blink,
+                        y_diff = y_diff,
+                        max_blinks = max_blinks, 
                     )
                     for trajectory in running_trajectories:
                         new_trajectories.append(copy(trajectory))
@@ -409,7 +426,7 @@ def track_locs(
     # Return (trajs, metadata, traj_cols)
     return spazio.load_trajs(out_file)
 
-def assign_full(
+def _assign_full(
     trajectories,
     localizations,
     mean_spot_intensity,
@@ -592,6 +609,121 @@ def assign_full(
 
     return active_trajectories, finished_trajectories
 
+def _assign_diffusion_only(
+    trajectories,
+    localizations,
+    frame_interval_sec = 0.00548,
+    sig2_bound_naive = 0.0584,
+    sig2_free = 8.77,
+    k_return_from_blink = 1.0,
+    y_diff = 0.9,
+    max_blinks = 0,
+):
+    # Get the size of the subproblem - the number of competing trajectories
+    # and/or localizations
+    n_trajs = len(trajectories)
+    n_locs = localizations.shape[0]
+
+    # The size of the log-likelihood matrix is n_trajs + n_locs, which
+    # allows for localizations to start new trajectories or old trajectories
+    # to end
+    n_dim = n_trajs + n_locs
+
+    # Instantiate the matrix of log-likelihoods. 
+    LL = np.zeros((n_dim, n_dim), dtype = 'float64')
+
+    # If i >= n_trajs and j < n_locs, then LL[i,j] is the cost of starting
+    # a new trajectory. This is set to the log-likelihood ratio for detection.
+    for j in range(n_locs):
+        LL[n_trajs:, j] = -50.0
+
+    # If i < n_trajs and j >= n_locs, then LL[i,j] is the cost of putting
+    # a trajectory into blink. This is set to a fixed value.
+    LL[:, n_locs:] = -50
+
+    # If i < n_trajs and j < n_locs, then LL[i,j] corresponds to the log-likelihood
+    # of some traj-loc reconnection.
+
+    # Iterate through the trajectories for the diffusion/blinking contributions
+    for traj_idx, trajectory in enumerate(trajectories):
+
+        # Return-from-blink penalty
+        L_blink = -k_return_from_blink * trajectory.n_blinks + np.log(k_return_from_blink)
+
+        # Displacement likelihood; varies from -5 to 0 and strongly favors closer
+        # reconnections
+        squared_r = utils.sq_radial_distance(trajectory.positions[-1,:], localizations[:,1:3])
+        r = np.sqrt(squared_r)
+
+        # If there are enough past displacements, estimate the radial displacement
+        # variance for the bound state. Else set it to its default, naive_sig2_bound.
+        sig2_bound = trajectory.calculate_sig2_bound()
+
+        # Adjust the expected diffusion for gaps in the trajectory
+        sig2_bound = sig2_bound * (1 + trajectory.n_blinks)
+        traj_sig2_free = sig2_free * (1 + trajectory.n_blinks)
+
+        # Get the relative probabilities of diffusing to each of the
+        # eligible localizations
+        P_disp_bound = (r / sig2_bound) * np.exp(-squared_r / (2 * sig2_bound))
+        P_disp_free = (r / traj_sig2_free) * np.exp(-squared_r / (2 * traj_sig2_free))
+        L_diff = np.log(y_diff*P_disp_bound + (1-y_diff)*P_disp_free)
+
+        # Assign to the corresponding positions in the log-likelihood array
+        LL[traj_idx, :n_locs] = L_blink + L_diff
+
+    # The Hungarian algorithm will find the minimum path through its matrix
+    # argument, so take the negative of the log likelihoods
+    LL = LL * -1 
+
+    # Find the trajectory-localization assignment that maximizes the total
+    # log likelihoods
+    assignments = m.compute(LL)
+    assign_traj = [i[0] for i in assignments]
+    assign_locs = [i[1] for i in assignments]
+
+    # Deal with the aftermath, keeping track of which trajectories
+    # have finished and which are still running
+    active_trajectories = []
+    finished_trajectories = []
+
+    # For each trajectory, either set it into blink or match it with the
+    # corresponding localization
+    for traj_idx, trajectory in enumerate(trajectories):
+
+        # Trajectory did not match with a localization: increment its
+        # blink counter and terminate if necessary
+        if assign_locs[traj_idx] >= n_locs:
+            trajectory.n_blinks += 1
+            if trajectory.n_blinks > max_blinks:
+                finished_trajectories.append(trajectory)
+            else:
+                active_trajectories.append(trajectory)
+
+        # Trajectory matched with a localization; update its info
+        else:
+            loc_idx = assign_locs[traj_idx]
+            loc = localizations[loc_idx, :]
+            trajectory.add_loc(loc, (n_trajs, n_locs))
+
+            # Pass the trajectory on for reconnection in the next frame
+            active_trajectories.append(trajectory)
+
+    # For each unpaired localization, start a new trajectory
+    for traj_idx in range(n_trajs, n_dim):
+
+        # Get the loc info
+        loc_idx = assign_locs[traj_idx]
+
+        # Index corresponds to a real localization
+        if loc_idx < n_locs:
+            loc = localizations[loc_idx, :]
+            trajectory = Trajectory(loc, sig2_bound_naive, (n_trajs, n_locs))
+
+            # Pass the trajectory for reconnection in the next frame
+            active_trajectories.append(trajectory)
+
+    return active_trajectories, finished_trajectories
 
 class Trajectory(object):
     '''

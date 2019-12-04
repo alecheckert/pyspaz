@@ -209,10 +209,6 @@ def attrib_dist(
     if finish_plot:
         plt.tight_layout(); plt.show(); plt.close()
 
-
-
-
-
     
 def loc_density_from_trajs_mat_format(
     trajs,

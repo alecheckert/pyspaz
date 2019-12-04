@@ -482,32 +482,37 @@ def cdf_two_state_brownian_zcorr(
     delta_z = 0.7,
 ):
     '''
-    CDF for the radial displacements of a two-state Brownian
-    particle without state transitions. Only displacements
-    in a thin axial slice of thickness *delta_z* are observed.
+    CDF for the 2D radial displacements of a population of
+    Brownian particles with two diffusion coefficients, *d_free* and
+    *d_bound*, that are observed in a thin axial detection slice. The fraction
+    of particles in the slower-moving state is given by *f_bound*, and
+    particles are assumed not to convert between the states.
+
+    This version uses a type of correction for the loss of particles
+    due to axial diffusion out of the detection slice that is more
+    suited to tracking with gaps.
 
     args
-        r_dt                :   2D ndarray of shape (n_points, 2),
-                                    the right radial displacement bins
-                                    and frame intervals for each data point
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the CDF
 
-        f_bound             :   float, fraction of molecules in 
-                                    the slower-moving (`bound`) state
+        f_bound     :   float, fraction of molecules in the slower-moving
+                            state
 
-        d_free              :   float, diffusion coefficient for 
-                                    free state in um^2 s^-1
+        d_free      :   float, diffusion coefficient for the fast state
+                            in um^2 s^-1
 
-        d_bound             :   float, diffusion coefficient for
-                                    bound state in um^2 s^-1
+        d_bound     :   float, diffusion coefficient for the slow state
+                            in um^2 s^-1
 
-        loc_error           :   float, localization error in um
+        loc_error   :   float, localization error in um
 
-        delta_z             :   float, the thickness of the axial
-                                    detection/observation slice in um
+        delta_z     :   float, thickness of the axial detection slice in um
 
     returns
-        1D ndarray, the model CDF at the points indicated by 
-            r_dt
+        1D ndarray of shape (n_points,), the CDF at the 
+            input points
 
     '''
     # 4 D t for the bound state 
@@ -549,11 +554,45 @@ def pdf_two_state_brownian_zcorr(
     d_bound,
     loc_error = 0.035,
     delta_z = 0.7,
-):
-    # 2 D t for bound state
+): 
+    '''
+    Density function for the 2D radial displacements of a population of
+    Brownian particles with two diffusion coefficients, *d_free* and
+    *d_bound*, that are observed in a thin axial detection slice. The fraction
+    of particles in the slower-moving state is given by *f_bound*, and
+    particles are assumed not to convert between the states.
+
+    This version uses a type of correction for the loss of particles
+    due to axial diffusion out of the detection slice that is more
+    suited to tracking with gaps.
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the PDF
+
+        f_bound     :   float, fraction of molecules in the slower-moving
+                            state
+
+        d_free      :   float, diffusion coefficient for the fast state
+                            in um^2 s^-1
+
+        d_bound     :   float, diffusion coefficient for the slow state
+                            in um^2 s^-1
+
+        loc_error   :   float, localization error in um
+
+        delta_z     :   float, thickness of the axial detection slice in um
+
+    returns
+        1D ndarray of shape (n_points,), the PDF at the 
+            input points
+
+    '''
+    # 4 D t for bound state
     var2_0 = 2 * (2 * d_bound * r_dt[:,1] + (loc_error ** 2))
 
-    # 2 D t for free state
+    # 4 D t for free state
     var2_1 = 2 * (2 * d_free * r_dt[:,1] + (loc_error ** 2))
 
     # Squared radial displacement
@@ -594,32 +633,37 @@ def cdf_two_state_brownian_zcorr_gapless(
     delta_z = 0.7,
 ):
     '''
-    CDF for the radial displacements of a two-state Brownian
-    particle without state transitions. Only displacements
-    in a thin axial slice of thickness *delta_z* are observed.
+    CDF for the 2D radial displacements of a population of
+    Brownian particles with two diffusion coefficients, *d_free* and
+    *d_bound*, that are observed in a thin axial detection slice. The fraction
+    of particles in the slower-moving state is given by *f_bound*, and
+    particles are assumed not to convert between the states.
+
+    This version uses a type of correction for the loss of particles
+    due to axial diffusion out of the detection slice that is more
+    suited to tracking without gaps.
 
     args
-        r_dt                :   2D ndarray of shape (n_points, 2),
-                                    the right radial displacement bins
-                                    and frame intervals for each data point
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the CDF
 
-        f_bound             :   float, fraction of molecules in 
-                                    the slower-moving (`bound`) state
+        f_bound     :   float, fraction of molecules in the slower-moving
+                            state
 
-        d_free              :   float, diffusion coefficient for 
-                                    free state in um^2 s^-1
+        d_free      :   float, diffusion coefficient for the fast state
+                            in um^2 s^-1
 
-        d_bound             :   float, diffusion coefficient for
-                                    bound state in um^2 s^-1
+        d_bound     :   float, diffusion coefficient for the slow state
+                            in um^2 s^-1
 
-        loc_error           :   float, localization error in um
+        loc_error   :   float, localization error in um
 
-        delta_z             :   float, the thickness of the axial
-                                    detection/observation slice in um
+        delta_z     :   float, thickness of the axial detection slice in um
 
     returns
-        1D ndarray, the model CDF at the points indicated by 
-            r_dt
+        1D ndarray of shape (n_points,), the CDF at the 
+            input points
 
     '''
     # 4 D t for the bound state 
@@ -664,10 +708,44 @@ def pdf_two_state_brownian_zcorr_gapless(
     loc_error = 0.035,
     delta_z = 0.7,
 ):
-    # 2 D t for bound state
+    '''
+    Density function for the 2D radial displacements of a population of
+    Brownian particles with two diffusion coefficients, *d_free* and
+    *d_bound*, that are observed in a thin axial detection slice. The fraction
+    of particles in the slower-moving state is given by *f_bound*, and
+    particles are assumed not to convert between the states.
+
+    This version uses a type of correction for the loss of particles
+    due to axial diffusion out of the detection slice that is more
+    suited to tracking without gaps.
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the PDF
+
+        f_bound     :   float, fraction of molecules in the slower-moving
+                            state
+
+        d_free      :   float, diffusion coefficient for the fast state
+                            in um^2 s^-1
+
+        d_bound     :   float, diffusion coefficient for the slow state
+                            in um^2 s^-1
+
+        loc_error   :   float, localization error in um
+
+        delta_z     :   float, thickness of the axial detection slice in um
+
+    returns
+        1D ndarray of shape (n_points,), the PDF at the 
+            input points
+
+    '''
+    # 4 D t + err for bound state
     var2_0 = 2 * (2 * d_bound * r_dt[:,1] + (loc_error ** 2))
 
-    # 2 D t for free state
+    # 4 D t + err for free state
     var2_1 = 2 * (2 * d_free * r_dt[:,1] + (loc_error ** 2))
 
     # Squared radial displacement
@@ -706,7 +784,25 @@ def cdf_one_state_brownian(
     d,
     loc_error = 0.035,
 ):
-    # 2 D t
+    '''
+    Cumulative distribution function for the 2D radial displacements
+    of a Brownian walker with diffusion coefficient *d*.
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the CDF
+
+        d           :   float, diffusion coefficient in um^2 s^-1
+
+        loc_error   :   float, localization error in um
+
+    returns
+        1D ndarray of shape (n_points,), the CDF at the 
+            input points
+
+    '''
+    # 4 D t + err
     var2 = 2 * (2 * d * r_dt[:,1] + loc_error**2)
 
     # Squared radial displacement
@@ -719,7 +815,25 @@ def pdf_one_state_brownian(
     d,
     loc_error = 0.035,
 ):
-    # 2 D t
+    '''
+    Density function for the 2D radial displacements of a Brownian
+    walker with diffusion coefficient *d*. 
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the PDF
+
+        d           :   float, diffusion coefficient in um^2 s^-1
+
+        loc_error   :   float, localization error in um
+
+    returns
+        1D ndarray of shape (n_points,), the PDF at the 
+            input points
+
+    '''
+    # 4 D t + err
     var2 = 2 * (2 * d * r_dt[:,1] + loc_error**2)
 
     # Squared radial displacement
@@ -733,7 +847,64 @@ def cdf_one_state_brownian_on_fractal(
     df,
     loc_error = 0.035,
 ):
-    
+    '''
+    Cumulative distribution function for the 2D radial 
+    displacements of a Brownian particle diffusing on a
+    2D fractal with fractal dimension *df*.
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the CDF
+
+        d           :   float, diffusion coefficient in um^2 s^-1
+
+        df          :   float, fractal dimension
+
+        loc_error   :   float, localization error in um
+
+    returns
+        1D ndarray of shape (n_points,), the CDF at the 
+            input points
+
+    '''
+    var2 = 2 * (2 * d * r_dt[:,1] + loc_error ** 2)
+    r2 = r_dt[:,0] ** 2
+    return gammainc(float(df)/2, r2/var2)
+
+def pdf_one_state_brownian_on_fractal(
+    r_dt,
+    d,
+    df,
+    loc_error = 0.035,
+):
+    '''
+    Density function for the 2D radial displacements of a
+    Brownian particle diffusing on a 2D fractal with fractal
+    dimension *df*.
+
+    args
+        r_dt        :   2D ndarray of shape (n_points, 2), the
+                            (r, dt) points at which to evaluate
+                            the PDF
+
+        d           :   float, diffusion coefficient in um^2 s^-1
+
+        df          :   float, fractal dimension
+
+        loc_error   :   float, localization error in um
+
+    returns
+        1D ndarray of shape (n_points,), the PDF at the 
+            input points
+
+    '''
+    var2 = 2 * (2 * d * r_dt[:,1] + loc_error ** 2)
+    r2 = r_dt[:,0]**2
+
+    return ( 2 * np.power(r_dt[:,0], df-1.0) * np.exp(-r2 / var2) ) / \
+        ( np.power(var_2, float(df) / 2) * gamma(float(df) / 2) )
+
 
 
 
@@ -750,6 +921,10 @@ MODELS = {
     'one_state_brownian' : {
         'cdf' : cdf_one_state_brownian,
         'pdf' : pdf_one_state_brownian,
+    },
+    'one_state_brownian_on_fractal' : {
+        'cdf' : cdf_one_state_brownian_on_fractal,
+        'pdf' : pdf_one_state_brownian_on_fractal,
     }
 }
 
@@ -761,7 +936,7 @@ DEFAULTS = {
             np.array([0, 0.2, 0.0]),
             np.array([1.0, 20.0, 0.05]),
         ),
-        'initial_guess_n' : (5, 1, 5),
+        'initial_guess_n' : (5, 5, 1),
         'fit_bounds' : (
             np.array([0.0, 0.2, 0.0]),
             np.array([1.0, 50.0, 0.05]),
@@ -772,7 +947,7 @@ DEFAULTS = {
             np.array([0, 0.2, 0.0]),
             np.array([1.0, 20.0, 0.05]),
         ),
-        'initial_guess_n' : (5, 1, 5),
+        'initial_guess_n' : (5, 5, 1),
         'fit_bounds' : (
             np.array([0.0, 0.2, 0.0]),
             np.array([1.0, 50.0, 0.05]),
@@ -789,6 +964,17 @@ DEFAULTS = {
             np.array([100.0]),
         ),
     },
+    'one_state_brownian_on_fractal' : {
+        'initial_guess_bounds' : (
+            np.array([0, 0.5]),
+            np.array([30.0, 3.0]),
+        ),
+        'initial_guess_n' : np.array([5, 10]),
+        'fit_bounds' : (
+            np.array([0.0, 0.5]),
+            np.array([100.0, 10.0]),
+        ),
+    }
 }
 
 
