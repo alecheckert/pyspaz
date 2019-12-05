@@ -30,6 +30,22 @@ from pyspaz import visualize
 # Progress bar
 from tqdm import tqdm 
 
+def add_locs_per_frame(locs, frame_col = 'frame_idx'):
+    '''
+    Add a column to a pandas.DataFrame that shows the
+    number of localizations in each frame.
+
+    args
+        locs        :   pandas.DataFrame, localizations / trajectories
+        frame_col   :   str, column in *trajs* with the frame index
+
+    returns
+        pandas.DataFrame with the new 'locs_per_frame' column
+
+    '''
+    return locs.join(locs.groupby(frame_col).size().rename('locs_per_frame'), on=frame_col)
+
+
 def compile_displacements(
     trajs,
     n_gaps = 0,
@@ -41,6 +57,7 @@ def compile_displacements(
     max_disp = 5.0,
     n_bins = 5001,
     pixel_size_um = 0.16,
+    start_frame = 0,
 ):
     '''
     Compile radial displacements from a given dataframe into
@@ -99,6 +116,12 @@ def compile_displacements(
 
     # Convert loc coordinates from pixels to um
     df = trajs.assign(y_um = trajs[y_col] * pixel_size_um, x_um = trajs[x_col] * pixel_size_um)
+
+    # Filter out unconnected localizations
+    df = df.loc[df['traj_idx'] > 0]
+
+    # Take only displacements after the start frame
+    df = df.loc[df['frame_idx'] >= start_frame]
 
     # If there are no gaps in tracking, then pandas.DataFrame.diff()
     # does all the work for us
@@ -172,24 +195,26 @@ def compile_displacements_directory(
     '''
     # If the user passes a directory name for *loc_file_list*,
     # run on all of the *.locs files in that directory
-    if os.path.isdir(loc_file_list):
+    if type(loc_file_list) == type('') and os.path.isdir(loc_file_list):
         dir_name = copy(loc_file_list)
-        loc_file_list = ['%s/%s' % (dir_name, i) for i in os.listdir(dir_name)]
+        loc_file_list = glob("%s/*.locs" % dir_name)
 
-    # Check that all of the files exist
-    for fname in loc_file_list:
-        spazio.check_file_exists(fname)
+    locs, metadata = spazio.load_locs(loc_file_list[0])
+    c_traj_idx = 0
+    for i in range(1, len(loc_file_list)):
+        locs_2, metadata_2 = spazio.load_locs(loc_file_list[i])
+        locs_2 = locs_2[locs_2['traj_idx'] > 0]
+        n_trajs = locs_2['traj_idx'].max()
+        locs_2['traj_idx'] = locs_2['traj_idx'] + c_traj_idx
+        c_traj_idx += n_trajs 
 
-    # Put all of the localizations into one dataframe
-    df = pd.concat(
-        [pd.read_csv(fname, sep='\t').assign(file_idx=i) for \
-            i, fname in enumerate(loc_file_list)],
-        ignore_index = True, sort = False,
-    )
+        locs = pd.concat([locs, locs_2], ignore_index = True, sort = False)
+    
+    locs.index = np.arange(len(locs))
 
     # Compile radial displacement histograms
     histograms, bin_edges, df = compile_displacements(
-        df,
+        locs,
         **kwargs,
     )
     return histograms, bin_edges, df
@@ -269,6 +294,7 @@ def fit_radial_disp_model(
         bin_edges,
         delta_t,
     )
+    # plt.plot(np.arange(ext_cdf.shape[0]), ext_cdf); plt.show(); plt.close()
 
     # Fit data to model
     popt, pcov = _fit_from_initial_guesses(
@@ -335,7 +361,7 @@ def fit_radial_disp_model(
             out_png = out_png_cdf,
         )
 
-    return popt 
+    return popt, pcov 
 
 # 
 # Fitting utilities
@@ -344,6 +370,7 @@ def _format_radial_disp_cdf(
     radial_disp_histograms,
     bin_edges,
     delta_t,
+    fit_until = None,
 ):
     # Get the number of timepoint and radial distance bins
     n_bins, n_dt = radial_disp_histograms.shape
@@ -356,6 +383,10 @@ def _format_radial_disp_cdf(
     for dt_idx in range(n_dt):
         cdfs[dt_idx, :] = np.cumsum(radial_disp_histograms[:, dt_idx])
         cdfs[dt_idx, :] = cdfs[dt_idx, :] / cdfs[dt_idx, -1]
+
+    # Truncate the CDFs if desired
+    if not (fit_until is None):
+        cdfs = cdfs[:fit_]
 
     # Make the ext_cdf vector, which represents the response
     # variable for every tuple (r_bin, dt)
@@ -453,6 +484,8 @@ def _fit_from_initial_guesses(
             p0 = guess,
         )
         sum_sq_err[g_idx] = ((_model(r_dt, *popt) - ext_cdf)**2).sum()
+
+    print(list(sum_sq_err))
 
     # Identify the guess with the minimum sum of squares
     m_idx = np.argmin(sum_sq_err)
@@ -905,8 +938,302 @@ def pdf_one_state_brownian_on_fractal(
     return ( 2 * np.power(r_dt[:,0], df-1.0) * np.exp(-r2 / var2) ) / \
         ( np.power(var_2, float(df) / 2) * gamma(float(df) / 2) )
 
+def cdf_two_state_brownian_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    loc_error = 0.04,
+    delta_z = 0.7,
+):
+    # positional variances of the two states
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
 
+    # spectral dimension
+    spec_dim = float(df) / 2 
 
+    # squared displacement
+    r2 = r_dt[:,0]**2
+
+    # correction for loss of free particles
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
+        return 0.5 * (gammaincc(spec_dim/2, (half_z-z0)**2 / pos_var) + \
+            gammaincc(spec_dim/2, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var2_1[r_dt[:,1]==unique_dt][0]),
+        )[0] / delta_z 
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    # The cdf of each state in terms of regularized lower incomplete
+    # gamma functions
+    cdf_state_0 = (1-f1_corr) * gammainc(1.0, r2 / var2_0)
+    #cdf_state_0 = (1-f1_corr) * gammainc(spec_dim, r2 / var2_0)
+    cdf_state_1 = f1_corr * gammainc(spec_dim, r2 / var2_1)
+
+    return cdf_state_0 + cdf_state_1 
+
+def pdf_two_state_brownian_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    loc_error = 0.04,
+    delta_z = 0.7,
+):
+    # positional variances of the two states
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
+
+    # spectral dimension
+    spec_dim = float(df) / 2 
+
+    # squared displacement
+    r2 = r_dt[:,0]**2
+
+    # correction for loss of free particles
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        ''' pos_var : e.g. 4 D t '''
+        return 0.5 * (gammaincc(spec_dim/2, (half_z-z0)**2 / pos_var) + \
+            gammaincc(spec_dim/2, (half_z+z0)**2 / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var2_1[r_dt[:,1]==unique_dt][0]),
+        )[0] / delta_z 
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    # The pdf of each state in terms of regularized lower incomplete
+    # gamma functions
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    pdf_state_0 = (1-f1_corr) * r_dt[:,0] * np.exp(-r2 / var2_0) / (0.5 * var2_0)
+    #pdf_state_0 = (1-f1_corr) * 2 * r_df_min_1 * np.exp(-r2/var2_0) / (np.power(var2_0, spec_dim) * gamma(spec_dim))
+    pdf_state_1 = f1_corr * 2 * r_df_min_1 * np.exp(-r2/var2_1) / (np.power(var2_1, spec_dim) * gamma(spec_dim))
+
+    return pdf_state_0 + pdf_state_1 
+
+def cdf_one_state_subdiffusion_on_fractal(
+    r_dt,
+    d,
+    df,
+    dw,
+    loc_error = 0.035,
+):
+    dw = float(dw)
+    var2 = np.power(2 * (2 * d * r_dt[:,1] + loc_error**2), 1.0/(dw-1))
+    factor = dw / (dw - 1)
+    r_factor = np.power(r_dt[:,0], factor)
+    return gammainc(float(df)/dw, r_factor / var2)
+
+def pdf_one_state_subdiffusion_on_fractal(
+    r_dt,
+    d,
+    df,
+    dw,
+    loc_error = 0.035,
+):
+    dw = float(dw)
+    factor = dw / (dw - 1)
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    r_factor = np.power(r_dt[:,0], factor)
+
+    var2_pre = 2 * (2 * d * r_dt[:,1] + loc_error**2)
+
+    var2 = np.power(var2_pre, 1.0/(dw-1))
+    norm_1 = np.power(var2_pre, float(df) / dw)
+    return factor * r_df_min_1 * np.exp(-r_factor / var2) / (norm_1 * gamma(df / factor))
+
+def cdf_two_state_subdiffusion_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.047,
+    delta_z = 0.7,
+):
+    '''
+    Guyer model
+    '''
+    dw = float(dw)
+    factor = dw / (dw - 1)
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    r_factor = np.power(r_dt[:,0], factor)
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
+    var2_1_renorm_1 = np.power(var2_1, 1.0/(dw-1))
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+    spec_dim = df / factor 
+
+    def _fraction_lost(z0, pos_var):
+        return 0.5 * (gammaincc(spec_dim/2, np.power(half_z-z0, factor) / pos_var) + \
+            gammaincc(spec_dim/2, np.power(half_z+z0, factor) / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var2_1_renorm_1[r_dt[:,1] == unique_dt][0]),
+        )[0] / delta_z 
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    cdf_state_0 = (1-f1_corr) * gammainc(1.0, r_dt[:,0]**2 / var2_0)
+    cdf_state_1 = f1_corr * gammainc(spec_dim, r_factor / var2_1_renorm_1)
+
+    return cdf_state_0 + cdf_state_1     
+
+def pdf_two_state_subdiffusion_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.047,
+    delta_z = 0.7,
+):
+    '''
+    Guyer model
+    '''
+    dw = float(dw)
+    factor = dw / (dw - 1)
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    r_factor = np.power(r_dt[:,0], factor)
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
+    var2_1_renorm_0 = np.power(var2_1, float(df)/dw)
+    var2_1_renorm_1 = np.power(var2_1, 1.0/(dw-1))
+
+    # Correction for loss of free particles
+    half_z = delta_z / 2
+    spec_dim = df / factor 
+
+    def _fraction_lost(z0, pos_var):
+        return 0.5 * (gammaincc(spec_dim/2, np.power(half_z-z0, factor) / pos_var) + \
+            gammaincc(spec_dim/2, np.power(half_z+z0, factor) / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var2_1_renorm_1[r_dt[:,1] == unique_dt][0]),
+        )[0] / delta_z 
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    pdf_state_0 = (1-f1_corr) * r_dt[:,0] * np.exp(-(r_dt[:,0]**2) / var2_0) / (0.5 * var2_0)
+    pdf_state_1 = f1_corr * factor * r_df_min_1 * np.exp(-r_factor / var2_1_renorm_1) / (var2_1_renorm_0 * gamma(spec_dim))
+
+    return pdf_state_0 + pdf_state_1 
+
+def cdf_two_state_oshaughnessy(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.04,
+    delta_z = 0.7,
+):
+    '''
+    STILL UNDER CONSTRUCTION
+    '''
+    dim = float(df) / dw
+    r0_exp_dw = np.power(r_dt[:,0], dw)
+    var0_2 = (dw**2) * d0 * r_dt[:,1] + 0.5 * loc_error**2
+    var1_2 = (dw**2) + d1 * r_dt[:,1] + 0.5 * loc_error**2
+
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        return 0.5 * (gammaincc(dim, np.power((half_z-z0), dw) / pos_var) + \
+            gammaincc(dim, np.power((half_z+z0), dw) / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var1_2[r_dt[:,1] == unique_dt][0])
+        )[0] / delta_z
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    cdf_state_0 = (1-f1_corr) * gammainc(dim, r0_exp_dw / var0_2)
+    cdf_state_1 = f1_corr * gammainc(dim, r0_exp_dw / var1_2)
+
+    return cdf_state_0 + cdf_state_1 
+
+def pdf_two_state_oshaughnessy(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.04,
+    delta_z = 0.7,
+):
+    '''
+    STILL UNDER CONSTRUCTION
+    '''
+    dim = float(df) / dw
+    r0_exp_dw = np.power(r_dt[:,0], dw)
+    r0_exp_df_min_1 = np.power(r_dt[:,0], df-1)
+
+    var0_2 = (dw**2) * d0 * r_dt[:,1] + 0.5 * loc_error**2
+    var1_2 = (dw**2) + d1 * r_dt[:,1] + 0.5 * loc_error**2
+
+    half_z = delta_z / 2
+
+    def _fraction_lost(z0, pos_var):
+        return 0.5 * (gammaincc(dim, np.power((half_z-z0), dw) / pos_var) + \
+            gammaincc(dim, np.power((half_z+z0), dw) / pos_var))
+
+    unique_dts = np.unique(r_dt[:,1])
+    f1_corr = np.zeros(r_dt.shape[0], dtype = 'float64')
+    for unique_dt in unique_dts:
+        f_lost = quad(
+            _fraction_lost,
+            -half_z,
+            half_z,
+            args = (var1_2[r_dt[:,1] == unique_dt][0])
+        )[0] / delta_z
+        f1_corr[r_dt[:,1] == unique_dt] = (1 - f0) * (1 - f_lost) / (1 - (1 - f0) * f_lost)
+
+    pdf_state_0 = (1-f1_corr) * dw * r0_exp_df_min_1 * np.exp(-r0_exp_dw / var0_2) / (np.power(var0_2, dim) * gamma(dim))
+    pdf_state_1 = f1_corr * dw * r0_exp_df_min_1 * np.exp(-r0_exp_dw / var1_2) / (np.power(var1_2, dim) * gamma(dim))
+
+    return pdf_state_0 + pdf_state_1 
 
 # Models available for comparison
 MODELS = {
@@ -925,7 +1252,23 @@ MODELS = {
     'one_state_brownian_on_fractal' : {
         'cdf' : cdf_one_state_brownian_on_fractal,
         'pdf' : pdf_one_state_brownian_on_fractal,
-    }
+    },
+    'two_state_brownian_on_fractal' : {
+        'cdf' : cdf_two_state_brownian_on_fractal,
+        'pdf' : pdf_two_state_brownian_on_fractal,
+    },
+    'one_state_subdiffusion_on_fractal' : {
+        'cdf' : cdf_one_state_subdiffusion_on_fractal,
+        'pdf' : pdf_one_state_subdiffusion_on_fractal,
+    },
+    'two_state_subdiffusion_on_fractal' : {
+        'cdf' : cdf_two_state_subdiffusion_on_fractal,
+        'pdf' : pdf_two_state_subdiffusion_on_fractal,
+    },
+    'two_state_oshaughnessy' : {
+        'cdf' : cdf_two_state_oshaughnessy,
+        'pdf' : pdf_two_state_oshaughnessy,
+    },
 }
 
 # Default fitting bounds for each model, if the user doesn't
@@ -974,7 +1317,51 @@ DEFAULTS = {
             np.array([0.0, 0.5]),
             np.array([100.0, 10.0]),
         ),
-    }
+    },
+    'two_state_brownian_on_fractal' : {
+        'initial_guess_bounds' : (
+            np.array([0.0, 0.0, 0.2, 0.5]),
+            np.array([1.0, 0.1, 100.0, 3.0]),
+        ),
+        'initial_guess_n' : np.array([5, 1, 3, 5]),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.2, 0.5]),
+            np.array([1.0, 0.1, 100.0, 3.0]),
+        ),
+    },
+    'one_state_subdiffusion_on_fractal' : {
+        'initial_guess_bounds' : (
+            np.array([0, 0.5, 0.5]),
+            np.array([30.0, 3.0, 4.0]),
+        ),
+        'initial_guess_n' : np.array([5, 5, 5]),
+        'fit_bounds' : (
+            np.array([0.0, 0.5, 0.5]),
+            np.array([100.0, 5.0, 5.0]),
+        ),
+    },
+    'two_state_subdiffusion_on_fractal' : {
+        'initial_guess_bounds' : (
+            np.array([0.1, 0.01, 2.0, 1.0, 2.0]),
+            np.array([0.5, 0.05, 20.0, 2.0, 3.0]),
+        ),
+        'initial_guess_n' : np.array([2, 1, 2, 2, 2]),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.2, 0.5, 2.0]),
+            np.array([1.0, 0.05, 100.0, 4.0, 6.0]),
+        ),
+    },
+    'two_state_oshaughnessy' : {
+        'initial_guess_bounds' : (
+            np.array([0.1, 0.01, 2.0, 1.0, 2.0]),
+            np.array([0.5, 0.05, 20.0, 2.0, 3.0]),
+        ),
+        'initial_guess_n' : np.array([2, 1, 2, 2, 2]),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.2, 0.5, 2.0]),
+            np.array([1.0, 0.05, 100.0, 4.0, 6.0]),
+        ),
+    },
 }
 
 

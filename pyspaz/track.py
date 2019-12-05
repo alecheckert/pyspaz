@@ -2,7 +2,7 @@
 track.py
 
 '''
-# Numerical essentials
+# Numeric
 import numpy as np 
 
 # File reading / saving
@@ -55,12 +55,14 @@ def track_locs_directory(
 
     '''
     assert output_format in OUTPUT_FORMATS
-    
+
     kwargs['output_format'] = output_format 
     loc_files = glob("%s/*.locs" % directory_name)
 
     if out_dir == None:
         out_dir = directory_name
+    elif not os.path.isdir(out_dir):
+        os.mkdir(out_dir)
 
     if output_format == 'mat':
         file_suffix = '_Tracked.mat'
@@ -192,6 +194,7 @@ def track_locs(
     # between a trajectory and a connecting localization.
     search_radius = search_exp_fac * np.sqrt(np.pi * d_max * \
         frame_interval_sec / (pixel_size_um**2))
+    print('search_radius (pixels) = %.2f' % seaerch_radius)
 
     # Square the search radius, so we don't have to take square 
     # roots of every single radial displacement
@@ -428,10 +431,24 @@ def track_locs(
     for col_name in ['traj_idx', 'subproblem_n_traj', 'subproblem_n_loc']:
         locs_df[col_name] = np.zeros(len(locs_df), dtype='uint16')
 
+    # for traj_idx, traj in enumerate(completed_trajectories):
+    #     locs_df.loc[traj.loc_indices, 'traj_idx'] = traj_idx 
+    #     locs_df.loc[traj.loc_indices, 'subproblem_n_traj'] = [traj.subproblem_shapes[i][0] for i in range(len(traj.subproblem_shapes))]
+    #     locs_df.loc[traj.loc_indices, 'subproblem_n_loc'] = [traj.subproblem_shapes[i][1] for i in range(len(traj.subproblem_shapes))]
+
+    # Faster way to do the above
+    traj_index_col = np.zeros(len(locs_df), dtype = 'int64')
+    subproblem_n_traj_col = np.zeros(len(locs_df), dtype = 'int64')
+    subproblem_n_loc_col = np.zeros(len(locs_df), dtype = 'int64')
     for traj_idx, traj in enumerate(completed_trajectories):
-        locs_df.loc[traj.loc_indices, 'traj_idx'] = traj_idx 
-        locs_df.loc[traj.loc_indices, 'subproblem_n_traj'] = [traj.subproblem_shapes[i][0] for i in range(len(traj.subproblem_shapes))]
-        locs_df.loc[traj.loc_indices, 'subproblem_n_loc'] = [traj.subproblem_shapes[i][1] for i in range(len(traj.subproblem_shapes))]
+        traj_index_col[traj.loc_indices] = traj_idx 
+        subproblem_n_traj_col[traj.loc_indices] = [traj.subproblem_shapes[i][0] for i in range(len(traj.subproblem_shapes))]
+        subproblem_n_loc_col[traj.loc_indices] = [traj.subproblem_shapes[i][1] for i in range(len(traj.subproblem_shapes))]
+
+    locs_df['traj_idx'] = traj_index_col 
+    locs_df['subproblem_n_traj'] = subproblem_n_traj_col 
+    locs_df['subproblem_n_loc'] = subproblem_n_loc_col
+
 
     # Convert metadata None to str 'None'
     for k in metadata.keys():
