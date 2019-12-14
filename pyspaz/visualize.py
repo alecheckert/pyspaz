@@ -1249,6 +1249,7 @@ def plot_pdf_with_model_from_histogram(
     out_png = None,
     color_palette = 'magma',
     figsize_mod = 1.0,
+    ax = None,
 ):
     '''
     Plot the radial displacement histograms of tracking data 
@@ -1306,8 +1307,12 @@ def plot_pdf_with_model_from_histogram(
     exp_bin_centers = new_bin_edges[:-1] + exp_bin_size/2
     model_inflation_factor = exp_bin_size 
 
+    if (ax is None):
+        fig, ax = plt.subplots(n_dt, 1, figsize = (2.8 * figsize_mod, 0.9 * n_dt * figsize_mod))
+        finish_plot = True
+    else:
+        finish_plot = False
 
-    fig, ax = plt.subplots(n_dt, 1, figsize = (2.8 * figsize_mod, 0.9 * n_dt * figsize_mod))
     palette = sns.color_palette(color_palette, n_dt)
     for dt_idx in range(n_dt):
         exp_pdf = new_displacements[:, dt_idx] / new_displacements[:, dt_idx].sum()
@@ -1343,10 +1348,13 @@ def plot_pdf_with_model_from_histogram(
         ax[dt_idx].set_xlim((0, max_r))
     ax[-1].set_xlabel('Radial displacement ($\mu$m)', fontsize = 10)
 
-    if out_png != None:
-        wrapup(out_png, dpi = 600)
+    if finish_plot:
+        if out_png != None:
+            wrapup(out_png, dpi = 600)
+        else:
+            plt.tight_layout(); plt.show(); plt.close()
     else:
-        plt.tight_layout(); plt.show(); plt.close()
+        return ax 
 
 def plot_cdf_with_model_from_histogram(
     radial_disp_histograms,

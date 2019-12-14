@@ -10,6 +10,9 @@ from scipy.integrate import quad
 # Dataframes
 import pandas as pd 
 
+# Reading *Tracked.mat format trajectories
+from scipy import io as sio 
+
 # I/O
 import os
 import sys
@@ -45,6 +48,43 @@ def add_locs_per_frame(locs, frame_col = 'frame_idx'):
     '''
     return locs.join(locs.groupby(frame_col).size().rename('locs_per_frame'), on=frame_col)
 
+def traj_mask_membership(locs, mask_col, traj_mask_col, rule = 'any', traj_col = 'traj_idx'):
+    '''
+    Given a dataframe with locs annotated by mask membership,
+    classify each trajectory as belonging to the mask or not.
+
+    args
+        locs            :   pandas.DataFrame, traj-annotated locs
+        mask_col        :   str, column in *locs* indicating loc
+                                mask membership
+        traj_mask_col   :   str, column in *locs* to add with the 
+                                mask membership for trajectories
+        rule            :   str, either 'any', 'all', 'first', 'last',
+                                or 'both'
+        traj_col        :   str, column in *locs* indicating trajectory
+                                index
+
+    returns
+        pandas.DataFrame with the new column
+
+    '''
+    # Check if dataframe does not contain any trajectories that
+    # cross the boundary
+    if ~(locs.groupby(traj_col)[mask_col].any() & ~locs.groupby(traj_col)[mask_col].all()).any():
+        return locs 
+
+    if rule == 'any':
+        return locs.join(locs.groupby(traj_col)[mask_col].any().rename(traj_mask_col), on=traj_col)
+    elif rule == 'all':
+        return locs.join(locs.groupby(traj_col)[mask_col].all().rename(traj_mask_col), on=traj_col)
+    elif rule == 'first':
+        return locs.join(locs.groupby(traj_col)[mask_col].first().rename(traj_mask_col), on=traj_col)
+    elif rule == 'last':
+        return locs.join(locs.groupby(traj_col)[mask_col].last().rename(traj_mask_col), on=traj_col)
+    elif rule == 'both':
+        return locs.join((locs.groupby(traj_col)[mask_col].any() & ~locs.groupby(traj_col)[mask_col].all()).rename(traj_mask_col), on=traj_col)
+    else:
+        raise RuntimeError('traj_analysis.traj_mask_membership: rule must be any, all, first, last, or both')
 
 def compile_displacements(
     trajs,
@@ -58,6 +98,8 @@ def compile_displacements(
     n_bins = 5001,
     pixel_size_um = 0.16,
     start_frame = 0,
+    dim = 2,
+    condition_col = None,
 ):
     '''
     Compile radial displacements from a given dataframe into
@@ -94,6 +136,9 @@ def compile_displacements(
         pixel_size_um   :   float, the size of the camera pixels in 
                                 um
 
+        dim             :    int, dimensionality of displacements,
+                                either 1 or 2 
+
     returns
     (
         2D ndarray of shape (n_bins-1, time_delays), the displacement
@@ -110,6 +155,8 @@ def compile_displacements(
     if any([c not in trajs.columns for c in required_cols]):
         raise RuntimeError('traj_analysis.compile_displacements: input dataframe must contain the columns %s' % ', '.join(required_cols))
 
+    assert dim in [1, 2]
+
     # Make the sequence of radial displacement bins
     bin_edges = np.linspace(0, max_disp, n_bins)
     histograms = np.zeros((n_bins-1, time_delays), dtype = 'int64')
@@ -118,23 +165,31 @@ def compile_displacements(
     df = trajs.assign(y_um = trajs[y_col] * pixel_size_um, x_um = trajs[x_col] * pixel_size_um)
 
     # Filter out unconnected localizations
+    df = df[~pd.isnull(df['traj_idx'])]
     df = df.loc[df['traj_idx'] > 0]
 
     # Take only displacements after the start frame
     df = df.loc[df['frame_idx'] >= start_frame]
 
+    if not (condition_col is None):
+        df = df.loc[df[condition_col]]
+
     # If there are no gaps in tracking, then pandas.DataFrame.diff()
     # does all the work for us
     if n_gaps == 0:
-        for t in range(1, time_delays + 1):
+        for t in tqdm(range(1, time_delays + 1)):
             disps = df.groupby(traj_col)[['y_um', 'x_um']].diff(t)
             disps = disps[~pd.isnull(disps['y_um'])]
-            r_disps = np.sqrt((disps ** 2).sum(1))
+
+            if dim == 2:
+                r_disps = np.sqrt((disps ** 2).sum(1))
+            elif dim == 1:
+                r_disps = np.abs(disps).flatten()
 
             histo, _edges = np.histogram(r_disps, bins = bin_edges)
             histograms[:, t-1] = histo.copy()
 
-        return histograms, bin_edges, df 
+        return histograms, bin_edges
 
     # Otherwise need to deal with gaps
     else:
@@ -164,7 +219,7 @@ def compile_displacements(
             histo, _edges = np.histogram(r_disps, bins = bin_edges)
             histograms[:, t-1] = histo.copy()
 
-        return histograms, bin_edges, trajs_with_gaps 
+        return histograms, bin_edges
 
 def compile_displacements_directory(
     loc_file_list,
@@ -201,7 +256,7 @@ def compile_displacements_directory(
 
     locs, metadata = spazio.load_locs(loc_file_list[0])
     c_traj_idx = 0
-    for i in range(1, len(loc_file_list)):
+    for i in tqdm(range(1, len(loc_file_list))):
         locs_2, metadata_2 = spazio.load_locs(loc_file_list[i])
         locs_2 = locs_2[locs_2['traj_idx'] > 0]
         n_trajs = locs_2['traj_idx'].max()
@@ -209,15 +264,73 @@ def compile_displacements_directory(
         c_traj_idx += n_trajs 
 
         locs = pd.concat([locs, locs_2], ignore_index = True, sort = False)
+
+    if 'condition_col' in kwargs:
+        locs = traj_mask_membership(locs, kwargs['condition_col'], 'traj_in_mask')
+        kwargs['condition_col'] = 'traj_in_mask'
     
+    locs = locs.join(locs.groupby('traj_idx').size().rename('traj_len'), on = 'traj_idx')
+    locs = locs[locs['traj_len'] > 1]
     locs.index = np.arange(len(locs))
 
     # Compile radial displacement histograms
-    histograms, bin_edges, df = compile_displacements(
+    histograms, bin_edges = compile_displacements(
         locs,
         **kwargs,
     )
-    return histograms, bin_edges, df
+    return histograms, bin_edges
+
+
+def compile_displacements_tracked_mat(
+    tracked_mat_file_or_directory,
+    n_bins = 5001,
+    max_displacement = 5.0,  #um
+    n_dt = 4,      #number of delays at which to calculate displacements
+    max_traj_len = None,
+):
+    if os.path.isdir(tracked_mat_file_or_directory):
+        file_list = ['%s/%s' % (tracked_mat_file_or_directory, i) \
+            for i in os.listdir(tracked_mat_file_or_directory) \
+            if 'Tracked.mat' in i]
+    elif os.path.isfile(tracked_mat_file_or_directory):
+        file_list = [tracked_mat_file_or_directory]
+    else:
+        print('input %s not recognized' % tracked_mat_file_or_directory)
+        exit(1)
+
+    bin_sequence = np.linspace(0, max_displacement, n_bins)
+    displacements = np.zeros((n_dt, n_bins-1), dtype = 'uint32')
+
+    for file_idx, file_name in enumerate(file_list):
+        trajs = sio.loadmat(file_name)['trackedPar']
+        if trajs.shape[0] == 1:
+            trajs = trajs[0,:]
+
+        for traj_idx in range(trajs.shape[0]):
+            traj = trajs[traj_idx]
+            if max_traj_len != None:
+                traj[0] = traj[0][:max_traj_len, :]
+                traj_frames = traj[1].flatten()[:max_traj_len]
+            else:
+                traj_frames = traj[1].flatten()
+
+            if traj[0].shape[0] == 1:
+                continue 
+            for dt in range(1, n_dt + 1):
+                for loc_idx in range(traj[0].shape[0]):
+                    loc_frame = traj_frames[loc_idx]
+                    if (loc_frame + dt) in traj_frames:
+                        connect_idx = (traj_frames == (loc_frame + dt)).nonzero()[0][0]
+                        displacement = traj[0][connect_idx, :] - traj[0][loc_idx, :]
+                        r = np.sqrt((displacement ** 2).sum())
+                        if r > max_displacement:
+                            pass 
+                        else:
+                            bin_idx = (r <= bin_sequence).nonzero()[0][0] - 1
+                            displacements[dt-1, bin_idx] += 1
+
+    return displacements.T, bin_sequence 
+
 
 def fit_radial_disp_model(
     radial_disp_histograms,
@@ -229,7 +342,7 @@ def fit_radial_disp_model(
     fit_bounds = None,
     plot = True,
     out_png = None,
-    pdf_plot_max_r = 2.0,
+    pdf_plot_max_r = 1.0,
     **model_kwargs,
 ):
     '''
@@ -338,18 +451,6 @@ def fit_radial_disp_model(
             out_png_pdf = None 
             out_png_cdf = None 
 
-        visualize.plot_pdf_with_model_from_histogram(
-            radial_disp_histograms,
-            bin_edges,
-            model_pdf,
-            model_bin_centers[:,0],
-            delta_t,
-            max_r = pdf_plot_max_r,
-            exp_bin_size = 0.02,
-            figsize_mod = 2.0,
-            out_png = out_png_pdf,
-        )
-
         visualize.plot_cdf_with_model_from_histogram(
             radial_disp_histograms,
             bin_edges,
@@ -357,11 +458,25 @@ def fit_radial_disp_model(
             model_bin_centers[:,0],
             delta_t,
             color_palette = 'magma',
-            figsize_mod = 2.0,
+            figsize_mod = 1.0,
             out_png = out_png_cdf,
         )
 
-    return popt, pcov 
+        #fig, ax = plt.subplots(4, 1, figsize = (2.8, 0.9 * 4))
+        visualize.plot_pdf_with_model_from_histogram(
+            radial_disp_histograms,
+            bin_edges,
+            model_pdf,
+            model_bin_centers[:,0],
+            delta_t,
+            max_r = pdf_plot_max_r,
+            exp_bin_size = 0.04,
+            figsize_mod = 1.0,
+            out_png = out_png_pdf,
+            #ax = ax,
+        )
+        
+    return popt, pcov, ax
 
 # 
 # Fitting utilities
@@ -812,6 +927,50 @@ def pdf_two_state_brownian_zcorr_gapless(
 
     return (1-f1_corr)*pdf_0 + f1_corr*pdf_1 
 
+def cdf_two_state_brownian(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+):
+    # 4 D t for the bound state 
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + loc_error**2)
+
+    # 4 D t for the free state
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + loc_error**2)
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    part_0 = np.exp(-r2 / var2_0)
+    part_1 = np.exp(-r2 / var2_1)
+    return 1 - f_bound*part_0 - (1-f_bound)*part_1
+
+def pdf_two_state_brownian(
+    r_dt,
+    f_bound,
+    d_free,
+    d_bound,
+    loc_error = 0.035,
+    delta_z = 0.7,
+):
+    # 4 D t + err for bound state
+    var2_0 = 2 * (2 * d_bound * r_dt[:,1] + (loc_error ** 2))
+
+    # 4 D t + err for free state
+    var2_1 = 2 * (2 * d_free * r_dt[:,1] + (loc_error ** 2))
+
+    # Squared radial displacement
+    r2 = r_dt[:,0] ** 2
+
+    # Write out the PDF for each state, then add together
+    # to get the two-state PDF
+    pdf_0 = r_dt[:,0] * np.exp(-r2 / var2_0) / (0.5 * var2_0)
+    pdf_1 = r_dt[:,0] * np.exp(-r2 / var2_1) / (0.5 * var2_1)
+
+    return f_bound*pdf_0 + (1-f_bound)*pdf_1 
+
 def cdf_one_state_brownian(
     r_dt,
     d,
@@ -936,7 +1095,7 @@ def pdf_one_state_brownian_on_fractal(
     r2 = r_dt[:,0]**2
 
     return ( 2 * np.power(r_dt[:,0], df-1.0) * np.exp(-r2 / var2) ) / \
-        ( np.power(var_2, float(df) / 2) * gamma(float(df) / 2) )
+        ( np.power(var2, float(df) / 2) * gamma(float(df) / 2) )
 
 def cdf_two_state_brownian_on_fractal(
     r_dt,
@@ -1062,7 +1221,7 @@ def pdf_one_state_subdiffusion_on_fractal(
     norm_1 = np.power(var2_pre, float(df) / dw)
     return factor * r_df_min_1 * np.exp(-r_factor / var2) / (norm_1 * gamma(df / factor))
 
-def cdf_two_state_subdiffusion_on_fractal(
+def cdf_two_state_subdiffusion_on_fractal_zcorr(
     r_dt,
     f0,
     d0,
@@ -1107,7 +1266,7 @@ def cdf_two_state_subdiffusion_on_fractal(
 
     return cdf_state_0 + cdf_state_1     
 
-def pdf_two_state_subdiffusion_on_fractal(
+def pdf_two_state_subdiffusion_on_fractal_zcorr(
     r_dt,
     f0,
     d0,
@@ -1151,6 +1310,55 @@ def pdf_two_state_subdiffusion_on_fractal(
     pdf_state_0 = (1-f1_corr) * r_dt[:,0] * np.exp(-(r_dt[:,0]**2) / var2_0) / (0.5 * var2_0)
     pdf_state_1 = f1_corr * factor * r_df_min_1 * np.exp(-r_factor / var2_1_renorm_1) / (var2_1_renorm_0 * gamma(spec_dim))
 
+    return pdf_state_0 + pdf_state_1
+
+def cdf_two_state_subdiffusion_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.054,
+):
+    dw = float(dw)
+    factor = dw / (dw - 1)
+    spec_dim = df / factor 
+
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    r_factor = np.power(r_dt[:,0], factor)
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
+    var2_1_renorm_0 = np.power(var2_1, float(df)/dw)
+    var2_1_renorm_1 = np.power(var2_1, 1.0/(dw-1))
+    cdf_state_0 = f0 * gammainc(1.0, r_dt[:,0]**2 / var2_0)
+    cdf_state_1 = (1-f0) * gammainc(spec_dim, r_factor / var2_1_renorm_1)
+
+    return cdf_state_0 + cdf_state_1 
+
+def pdf_two_state_subdiffusion_on_fractal(
+    r_dt,
+    f0,
+    d0,
+    d1,
+    df,
+    dw,
+    loc_error = 0.054,
+):
+    dw = float(dw)
+    factor = dw / (dw - 1)
+    spec_dim = df / factor 
+
+    r_df_min_1 = np.power(r_dt[:,0], float(df)-1)
+    r_factor = np.power(r_dt[:,0], factor)
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + loc_error**2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + loc_error**2)
+    var2_1_renorm_0 = np.power(var2_1, float(df)/dw)
+    var2_1_renorm_1 = np.power(var2_1, 1.0/(dw-1))
+    pdf_state_0 = f0 * r_dt[:,0] * np.exp(-(r_dt[:,0]**2) / var2_0) / (0.5 * var2_0)
+    pdf_state_1 = (1-f0) * factor * r_df_min_1 * np.exp(-r_factor / var2_1_renorm_1) / (var2_1_renorm_0 * gamma(spec_dim))
+
+    
     return pdf_state_0 + pdf_state_1 
 
 def cdf_two_state_oshaughnessy(
@@ -1235,6 +1443,44 @@ def pdf_two_state_oshaughnessy(
 
     return pdf_state_0 + pdf_state_1 
 
+def cdf_three_state_brownian(
+    r_dt,
+    f0,
+    f1,
+    d0,
+    d1,
+    d2,
+    loc_error = 0.04,
+):
+    le2 = loc_error ** 2
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + le2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + le2)
+    var2_2 = 2 * (2 * d2 * r_dt[:,1] + le2)
+
+    r2 = r_dt[:,0] ** 2
+
+    return 1 - (f0*np.exp(-r2/var2_0) + f1*np.exp(-r2/var2_1) + (1.0-f0-f1)*np.exp(-r2/var2_2))
+
+def pdf_three_state_brownian(
+    r_dt,
+    f0,
+    f1,
+    d0,
+    d1,
+    d2,
+    loc_error = 0.04,
+):
+    le2 = loc_error ** 2
+    var2_0 = 2 * (2 * d0 * r_dt[:,1] + le2)
+    var2_1 = 2 * (2 * d1 * r_dt[:,1] + le2)
+    var2_2 = 2 * (2 * d2 * r_dt[:,1] + le2)
+    r2 = r_dt[:,0] ** 2
+    pdf_state_0 = r_dt[:,0] * np.exp(-r2/var2_0) / (0.5*var2_0)
+    pdf_state_1 = r_dt[:,0] * np.exp(-r2/var2_1) / (0.5*var2_1)
+    pdf_state_2 = r_dt[:,0] * np.exp(-r2/var2_2) / (0.5*var2_2)
+    return f0*pdf_state_0 + f1*pdf_state_1 + (1.0-f0-f1)*pdf_state_2
+
+
 # Models available for comparison
 MODELS = {
     'two_state_brownian_zcorr' : {
@@ -1261,6 +1507,10 @@ MODELS = {
         'cdf' : cdf_one_state_subdiffusion_on_fractal,
         'pdf' : pdf_one_state_subdiffusion_on_fractal,
     },
+    'two_state_subdiffusion_on_fractal_zcorr' : {
+        'cdf' : cdf_two_state_subdiffusion_on_fractal_zcorr,
+        'pdf' : pdf_two_state_subdiffusion_on_fractal_zcorr,
+    },
     'two_state_subdiffusion_on_fractal' : {
         'cdf' : cdf_two_state_subdiffusion_on_fractal,
         'pdf' : pdf_two_state_subdiffusion_on_fractal,
@@ -1268,6 +1518,14 @@ MODELS = {
     'two_state_oshaughnessy' : {
         'cdf' : cdf_two_state_oshaughnessy,
         'pdf' : pdf_two_state_oshaughnessy,
+    },
+    'three_state_brownian' : {
+        'cdf' : cdf_three_state_brownian,
+        'pdf' : pdf_three_state_brownian,
+    },
+    'two_state_brownian' : {
+        'cdf' : cdf_two_state_brownian,
+        'pdf' : pdf_two_state_brownian,
     },
 }
 
@@ -1282,7 +1540,7 @@ DEFAULTS = {
         'initial_guess_n' : (5, 5, 1),
         'fit_bounds' : (
             np.array([0.0, 0.2, 0.0]),
-            np.array([1.0, 50.0, 0.05]),
+            np.array([1.0, 50.0, 0.1]),
         ),
     },
     'two_state_brownian_zcorr_gapless' : {
@@ -1340,6 +1598,17 @@ DEFAULTS = {
             np.array([100.0, 5.0, 5.0]),
         ),
     },
+    'two_state_subdiffusion_on_fractal_zcorr' : {
+        'initial_guess_bounds' : (
+            np.array([0.1, 0.01, 2.0, 1.0, 2.0]),
+            np.array([0.5, 0.05, 20.0, 2.0, 3.0]),
+        ),
+        'initial_guess_n' : np.array([2, 1, 2, 2, 2]),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.2, 0.5, 2.0]),
+            np.array([1.0, 0.05, 100.0, 4.0, 6.0]),
+        ),
+    },
     'two_state_subdiffusion_on_fractal' : {
         'initial_guess_bounds' : (
             np.array([0.1, 0.01, 2.0, 1.0, 2.0]),
@@ -1360,6 +1629,28 @@ DEFAULTS = {
         'fit_bounds' : (
             np.array([0.0, 0.0, 0.2, 0.5, 2.0]),
             np.array([1.0, 0.05, 100.0, 4.0, 6.0]),
+        ),
+    },
+    'three_state_brownian' : {
+        'initial_guess_bounds' : (
+            np.array([0.0, 0.0, 0.01, 0.1, 1.0]),
+            np.array([0.5, 0.5, 0.01, 10.0, 10.0]),
+        ),
+        'initial_guess_n' : np.array([2, 2, 1, 2, 2]),
+        'fit_bounds' : (
+            np.array([0.0, 0.0, 0.0, 0.1, 1.0]),
+            np.array([1.0, 1.0, 0.1, 10.0, 100.0]),
+        ),
+    },
+    'two_state_brownian' : {
+        'initial_guess_bounds' : (
+            np.array([0, 0.2, 0.0]),
+            np.array([1.0, 20.0, 0.05]),
+        ),
+        'initial_guess_n' : (5, 5, 1),
+        'fit_bounds' : (
+            np.array([0.0, 0.2, 0.0]),
+            np.array([1.0, 50.0, 0.1]),
         ),
     },
 }

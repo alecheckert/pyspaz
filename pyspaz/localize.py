@@ -849,15 +849,13 @@ def detect_and_localize_file(
                 du_dbg = np.ones((window_size, window_size), dtype = 'float64')
 
                 # Determine the gradient of the log-likelihood at the current parameter vector.
-                # See the common structure of this term in section (1) of this notebook.
                 J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
                 grad[0] = (du_dy[nonzero] * J_factor).sum()
                 grad[1] = (du_dx[nonzero] * J_factor).sum()
                 grad[2] = (du_dI0[nonzero] * J_factor).sum()
                 grad[3] = (du_dbg[nonzero] * J_factor).sum()
 
-                # Determine the Hessian. See the common structure of these terms
-                # in section (1) of this notebook.
+                # Determine the Hessian
                 H_factor = psf_image[nonzero] / (model[nonzero]**2)
                 H[0,0] = (-H_factor * du_dy[nonzero]**2).sum()
                 H[0,1] = (-H_factor * du_dy[nonzero]*du_dx[nonzero]).sum()
@@ -1252,14 +1250,19 @@ def detect_and_localize_directory_parallelized(
 
     # Run detection/localization on each target file
     for f_idx, f_name in enumerate(file_list):
-        df, metadata = detect_and_localize_file_parallelized(
-            f_name,
-            dask_client,
-            out_txt = out_txt_list[f_idx],
-            verbose_times = verbose_times,
-            **kwargs,
-        )
-        if verbose_times: print('Finished with %s' % f_name)
+        try:
+            df, metadata = detect_and_localize_file_parallelized(
+                f_name,
+                dask_client,
+                out_txt = out_txt_list[f_idx],
+                verbose_times = verbose_times,
+                **kwargs,
+            )
+            if verbose_times:
+                print('Localized %d particles in %s' % (len(df), f_name))
+        except IndexError: # ND2 file contains an error
+            print('IndexError in file %s' % f_name)
+            continue 
 # 
 # More customized particle detection functions
 #
@@ -1434,6 +1437,220 @@ def _detect_log_filter(
 
     return image_filt, detections, peaks, detected_positions 
 
+def mle(
+    psf_image,
+    camera_gain = 1.0,
+    camera_bg = 0.0,
+    damp = 0.2,
+    sigma = 1.0,
+    initial_guess = 'radial_symmetry',
+    plot = False,
+    enforce_negative_definite = False,
+    convergence_crit = 3.0e-4,
+    divergence_crit = 1000.0,
+    max_iter = 20,
+    plot_type = '3d',
+):
+    psf_image = (psf_image - camera_bg) / camera_gain
+    psf_image[psf_image < 0.0] = 0.0
+    sig2_2 = 2 * (sigma ** 2)
+    sqrt_sig2_2 = np.sqrt(sig2_2)
+    sqrt_sig2_pi_2 = np.sqrt(np.pi * sig2_2)
+
+    window_size = psf_image.shape[0]
+    half_w = window_size // 2
+
+    y_field, x_field = np.mgrid[:window_size, :window_size]
+
+    init_pars = np.zeros(4, dtype = 'float64')
+    pars = np.zeros(4, dtype = 'float64')
+    update = np.zeros(4, dtype = 'float64')
+    grad = np.zeros(4, dtype = 'float64')
+    J = np.zeros(4, dtype = 'float64')
+    H = np.zeros((4, 4), dtype = 'float64')
+
+    # Guess by radial symmetry (usually the best)
+    if initial_guess == 'radial_symmetry':
+        init_pars[0], init_pars[1] = radial_symmetry(psf_image)
+        init_pars[3] = np.array([
+            psf_image[0,:-1].mean(),
+            psf_image[-1,1:].mean(),
+            psf_image[1:,0].mean(),
+            psf_image[:-1,-1].mean()
+        ]).mean()
+
+    # Guess by centroid method
+    elif initial_guess == 'centroid':
+        init_pars[0] = (y_field * psf_image).sum() / psf_image.sum()
+        init_pars[1] = (x_field * psf_image).sum() / psf_image.sum()
+        init_pars[3] = np.array([
+            psf_image[0,:-1].mean(),
+            psf_image[-1,1:].mean(),
+            psf_image[1:,0].mean(),
+            psf_image[:-1,-1].mean()
+        ]).mean()
+
+    # Simply place the guess in the center of the window
+    elif initial_guess == 'window_center':
+        init_pars[0] = window_size / 2
+        init_pars[1] = window_size / 2
+        init_pars[3] = psf_image.min()
+
+    # Other initial guess methods are not implemented
+    else:
+        raise NotImplementedError
+
+    # Use the model specification to guess I0
+    max_idx = np.argmax(psf_image)
+    max_y_idx = max_idx // window_size
+    max_x_idx = max_idx % window_size 
+    init_pars[2] = psf_image[max_y_idx, max_x_idx] - init_pars[3]
+    E_y_max = 0.5 * (erf((max_y_idx + 0.5 - init_pars[0]) / sqrt_sig2_2) - \
+            erf((max_y_idx - 0.5 - init_pars[0]) / sqrt_sig2_2))
+    E_x_max = 0.5 * (erf((max_x_idx + 0.5 - init_pars[1]) / sqrt_sig2_2) - \
+            erf((max_x_idx - 0.5 - init_pars[1]) / sqrt_sig2_2))
+    init_pars[2] = init_pars[2] / (E_y_max * E_x_max)
+
+    # If the I0 guess looks crazy (usually because there's a bright pixel
+    # on the edge), make a more conservative guess by integrating the
+    # inner ring of pixels
+    if (np.abs(init_pars[2]) > 1000) or (init_pars[2] < 0.0):
+        init_pars[2] = psf_image[half_w-1:half_w+2, half_w-1:half_w+2].sum()
+
+    # Set the current parameter set to the initial guess. Hold onto the
+    # initial guess so that if MLE diverges, we have a fall-back.
+    pars[:] = init_pars.copy()
+
+    # Keep track of the current number of iterations. When this exceeds
+    # *max_iter*, then the iteration is terminated.
+    iter_idx = 0
+
+    # Continue iterating until the maximum number of iterations is reached, or
+    # if the convergence criterion is reached
+    update = np.ones(4, dtype = 'float64')
+    while (iter_idx < max_iter) and any(np.abs(update[:2]) > convergence_crit):
+
+        #Calculate the PSF model under the current parameter set
+        E_y = 0.5 * (erf((y_field+0.5-pars[0])/sqrt_sig2_2) - \
+            erf((y_field-0.5-pars[0])/sqrt_sig2_2))
+        E_x = 0.5 * (erf((x_field+0.5-pars[1])/sqrt_sig2_2) - \
+            erf((x_field-0.5-pars[1])/sqrt_sig2_2))
+        model = pars[2] * E_y * E_x + pars[3]
+
+        # Avoid divide-by-zero errors
+        nonzero = (model > 0.0)
+
+        # Calculate the derivatives of the model with respect
+        # to each of the four parameters
+        du_dy = ((pars[2] / (2 * sqrt_sig2_pi_2)) * (
+            np.exp(-(y_field-0.5-pars[0])**2 / sig2_2) - \
+            np.exp(-(y_field+0.5-pars[0])**2 / sig2_2)
+        )) * E_x
+        du_dx = ((pars[2] / (2 * sqrt_sig2_pi_2)) * (
+            np.exp(-(x_field-0.5-pars[1])**2 / sig2_2) - \
+            np.exp(-(x_field+0.5-pars[1])**2 / sig2_2)
+        )) * E_y 
+        du_dI0 = E_y * E_x 
+        du_dbg = np.ones((window_size, window_size), dtype = 'float64')
+
+        # Determine the gradient of the log-likelihood at the current parameter vector.
+        J_factor = (psf_image[nonzero] - model[nonzero]) / model[nonzero]
+        grad[0] = (du_dy[nonzero] * J_factor).sum()
+        grad[1] = (du_dx[nonzero] * J_factor).sum()
+        grad[2] = (du_dI0[nonzero] * J_factor).sum()
+        grad[3] = (du_dbg[nonzero] * J_factor).sum()
+
+        # Determine the Hessian
+        H_factor = psf_image[nonzero] / (model[nonzero]**2)
+        H[0,0] = (-H_factor * du_dy[nonzero]**2).sum()
+        H[0,1] = (-H_factor * du_dy[nonzero]*du_dx[nonzero]).sum()
+        H[0,2] = (-H_factor * du_dy[nonzero]*du_dI0[nonzero]).sum()
+        H[0,3] = (-H_factor * du_dy[nonzero]).sum()
+        H[1,1] = (-H_factor * du_dx[nonzero]**2).sum()
+        H[1,2] = (-H_factor * du_dx[nonzero]*du_dI0[nonzero]).sum()
+        H[1,3] = (-H_factor * du_dx[nonzero]).sum()
+        H[2,2] = (-H_factor * du_dI0[nonzero]**2).sum()
+        H[2,3] = (-H_factor * du_dI0[nonzero]).sum()
+        H[3,3] = (-H_factor).sum()
+
+        # Use symmetry to complete the Hessian.
+        H[1,0] = H[0,1]
+        H[2,0] = H[0,2]
+        H[3,0] = H[0,3]
+        H[2,1] = H[1,2]
+        H[3,1] = H[1,3]
+        H[3,2] = H[2,3]
+
+        # Invert the Hessian. Here, we may need to stabilize the Hessian by adding
+        # a ridge term. We'll increase this ridge as necessary until we can actually
+        # invert the matrix.
+        Y = np.diag([1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5])
+        if enforce_negative_definite:
+            while 1:
+                try:
+                    pivots = get_pivots(H - Y)
+                    if (pivots > 0.0).any():
+                        Y *= 10
+                        continue
+                    else:
+                        H_inv = np.linalg.inv(H - Y)
+                        break
+                except (ZeroDivisionError, np.linalg.linalg.LinAlgError):
+                    Y *= 10
+                    continue
+        else:
+            while 1:
+                try:
+                    H_inv = np.linalg.inv(H - Y)
+                    break
+                except (ZeroDivisionError, np.linalg.linalg.LinAlgError):
+                    Y *= 10
+                    continue
+
+        # Get the update vector, the change in parameters
+        update = -H_inv.dot(grad) * damp 
+
+        # Update the parameters
+        pars = pars + update 
+        iter_idx += 1
+
+        # Debugging
+        if plot:
+            if plot_type == '2d':
+                print('iter %d' % iter_idx)
+                fig, ax = plt.subplots(1, 2, figsize = (6, 3))
+                ax[0].imshow(psf_image)
+                ax[1].imshow(model)
+                print(pars[:2])
+                for j in range(2):
+                    ax[j].plot(
+                        [pars[1]],
+                        [pars[0]],
+                        color = 'k',
+                        markersize = 10,
+                        marker = '.',
+                    )
+                plt.show(); plt.close()
+            elif plot_type == '3d':
+                print('iter %d' % iter_idx)
+                print(pars)
+                fig = plt.figure(figsize = (4, 4))
+                ax = fig.add_subplot(111, projection = '3d')
+                ax.plot_wireframe(
+                    y_field,
+                    x_field,
+                    psf_image,
+                    color = 'k',
+                )
+                ax.plot_wireframe(
+                    y_field,
+                    x_field,
+                    model,
+                    color = 'r'
+                )
+                plt.show(); plt.close()
 
 
+
+    return pars 
 

@@ -425,7 +425,7 @@ def mask_qc(
             )
     ax[0,0].set_ylim((0, N))
     ax[0,0].set_xlim((0, M))
-    ax[0,0].set_title('Mask definition')
+    ax[0,0].set_title('Mask definitions')
 
     # Show some interpolation
     colors_1 = sns.color_palette('viridis', 200)
@@ -490,6 +490,8 @@ def mask_qc(
         cmap = 'viridis',
         color_attrib = "I0",
     )
+    for j in range(3):
+        ax[1,j].set_aspect('equal')
     ax[1,0].set_title('All trajectories')
     ax[1,1].set_title('Not in mask')
     ax[1,2].set_title('Mask assignments')

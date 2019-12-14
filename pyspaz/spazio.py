@@ -39,6 +39,7 @@ def save_locs(locs_file, locs_df, metadata):
             value = metadata[key]
             o.write('%s\t%s\n' % (str(key), str(value)))
         o.write('METADATA_END\n')
+        locs_df.index = np.arange(len(locs_df))
         locs_df.to_csv(o, sep='\t', index=False)
 
 def load_locs(locs_file):

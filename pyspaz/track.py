@@ -194,7 +194,7 @@ def track_locs(
     # between a trajectory and a connecting localization.
     search_radius = search_exp_fac * np.sqrt(np.pi * d_max * \
         frame_interval_sec / (pixel_size_um**2))
-    print('search_radius (pixels) = %.2f' % seaerch_radius)
+    print('search_radius = %.2f pixels = %.2f um' % (search_radius, search_radius * pixel_size_um))
 
     # Square the search radius, so we don't have to take square 
     # roots of every single radial displacement

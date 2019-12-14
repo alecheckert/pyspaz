@@ -192,6 +192,7 @@ def draw_n_masks_on_loc_density(
     upsampling_factor = 10,
     y_col = 'y_pixels',
     x_col = 'x_pixels',
+    vmax_mod = 0.5,
 ):
     '''
     Convenience function to draw a mask directly on 
@@ -230,9 +231,12 @@ def draw_n_masks_on_loc_density(
     masks, mask_paths = draw_n_masks_prompt(
         density,
         n_masks,
+        vmax_mod = vmax_mod, 
     )
     if out_tif != None:
-        tifffile.imsave(out_tif, masks)
+        masks_wrapper = np.zeros((1, masks.shape[0], masks.shape[1]), dtype = masks.dtype)
+        masks_wrapper[0,:,:] = masks 
+        tifffile.imsave(out_tif, masks_wrapper)
 
     rescaled_mask_paths = []
     for mask_path in mask_paths:
