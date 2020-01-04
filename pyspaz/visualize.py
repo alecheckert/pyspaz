@@ -37,7 +37,17 @@ from tqdm import tqdm
 import ipywidgets as widgets
 from ipywidgets import interact, interactive, fixed, interact_manual
 
-
+def imshow(*imgs, vmax=1.0):
+    n = len(imgs)
+    if n == 1:
+        fig, ax = plt.subplots(figsize = (3, 3))
+        ax.imshow(imgs[0], cmap='gray', vmax = imgs[0].max()*vmax)
+        plt.show(); plt.close()
+    else:
+        fig, ax = plt.subplots(1, n, figsize = (3 * n, 3))
+        for i in range(n):
+            ax[i].imshow(imgs[i], cmap='gray', vmax=imgs[i].max()*vmax)
+        plt.show(); plt.close()
 
 def wrapup(out_png, dpi = 400, open_result = True):
     ''' Save a plot to PNG '''

@@ -410,6 +410,45 @@ def cartesian_product(*arrays):
         arr[..., i] = a 
     return arr.reshape(-1, la)
 
+def outer_pixel_mean(image_2d):
+    return np.array([
+        image_2d[:-1,0].mean(),
+        image_2d[-1,:-1].mean(),
+        image_2d[1:,-1].mean(),
+        image_2d[0,1:].mean(),
+    ]).mean()
+
+def integrate_spot(
+    image_2d,
+    yx_tuple,
+    integration_window_size = 5,
+    bg_window_size = 9,
+    enforce_nonzero = True,
+):
+    '''
+    Integrate a single PSF, subtracting background
+    by taking the mean of the outer ring of pixels.
+
+    '''
+    y, x = yx_tuple
+    half_iw = int(integration_window_size) // 2
+    half_bg = int(bg_window_size) // 2
+
+    I_spot = image_2d[
+        y - half_iw : y + half_iw + 1,
+        x - half_iw : x + half_iw + 1,
+    ].sum()
+    I_bg = outer_pixel_mean(image_2d[
+        y - half_bg : y + half_bg + 1,
+        x - half_bg : x + half_bg + 1,
+    ])
+
+    result = I_spot - (I_bg * (integration_window_size ** 2))
+    if enforce_nonzero:
+        if result < 0:
+            result = 0.0
+
+    return result 
 
 
 

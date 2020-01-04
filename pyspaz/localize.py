@@ -37,6 +37,9 @@ import os
 # Utility functions for localization
 from . import utils 
 
+# For extracting camera mean and variance
+from scipy.optimize import curve_fit 
+
 # # Parallelization
 import dask 
 # from dask.distributed import Client, progress 
@@ -698,7 +701,7 @@ def detect_and_localize_file(
     if type(frames_to_do) != type(np.array([])):
         frames_to_do = list(range(start_frame, stop_frame + 1))
 
-    for frame_idx in tqdm(frames_to_do, disable = ~progress_bar):
+    for frame_idx in frames_to_do:
         
         # Get the image corresponding to this frame from the reader
         image = reader.get_frame(frame_idx).astype('float64')
@@ -1650,7 +1653,91 @@ def mle(
                 )
                 plt.show(); plt.close()
 
-
-
     return pars 
+
+def calculate_camera_gain(
+    bg_nd2_files,
+    start_frame = 0,
+):
+    '''
+    Use Poisson noise in a set of BG movies to calculate the
+    camera gain and bg.
+
+    The relationship between pixel mean, pixel variance,
+    gain, and bg is 
+
+        variance = (mean - bg) * gain 
+
+    args
+        bg_nd2_files    :   list of str
+
+    '''
+    fig, ax = plt.subplots(figsize = (4, 4))
+    colors = ['#D4D4D4', '#B3B3B3', '#848484', '#5B5B5B', '#3A3A3A', '#161616']
+
+    all_means, all_variances = [], []
+
+    for path_idx, file_path in enumerate(bg_nd2_files):
+        reader = spazio.ImageFileReader(file_path)
+        N, M, n_frames = reader.get_shape()
+        if start_frame >= n_frames:
+            print('Start frame %d >= n_frames %d for movie %s' % (start_frame, n_frames, file_path))
+
+        result = np.zeros((N, M, n_frames), dtype = 'uint16')
+
+        c_idx = 0
+        for frame_idx in range(start_frame, n_frames):
+            try:
+                result[:, :, c_idx] = reader.get_frame(frame_idx)
+                c_idx += 1
+            except ValueError:  # Recording error; empty frame
+                continue 
+        result = result[:, :, :c_idx]
+
+        means = result.mean(axis = 2).flatten()
+        variances = result.var(axis = 2).flatten()
+
+        # Exclude crazy values, which can result from camera errors
+        # or moving molecules
+        ratios = variances / means 
+        noncrazy = (ratios < 300).nonzero()
+        means = means[noncrazy]
+        variances = variances[noncrazy]
+
+        all_means += list(means)
+        all_variances += list(variances)
+
+        ax.plot(
+            means,
+            variances,
+            marker = '.',
+            linestyle = '',
+            markersize = 5,
+            color = colors[path_idx % len(colors)],
+            label = None,
+        )
+
+        reader.close()
+
+
+    # Fit to get gain / BG of camera
+    def camera_model(x, gain, bg):
+        return gain * (x - bg)
+
+    popt, pcov = curve_fit(camera_model, all_means, all_variances)
+    model_means = np.array([0.0, max(all_means)])
+    model_vars = camera_model(model_means, *popt)
+    ax.plot(
+        model_means,
+        model_vars,
+        linestyle = '-',
+        linewidth = 2,
+        color = 'k',
+        label = 'gain = %.2f\nbg = %.2f' % (popt[0], popt[1]),
+    )
+    ax.legend(frameon=False, prop={'size':12}, loc='upper left')
+
+    ax.set_xlabel('Pixel mean')
+    ax.set_ylabel('Pixel variance')
+    plt.show(); plt.close()
 

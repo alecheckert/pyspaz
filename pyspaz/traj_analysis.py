@@ -18,6 +18,9 @@ import os
 import sys
 import tifffile
 
+# File-finding
+from glob import glob 
+
 # Plotting
 import matplotlib.pyplot as plt 
 
@@ -89,6 +92,179 @@ def traj_mask_membership(locs, mask_col, traj_mask_col, rule = 'any', traj_col =
 def compile_displacements(
     trajs,
     n_gaps = 0,
+    n_dt = 4,
+    max_disp = 5.0,
+    n_bins = 5001,
+    pixel_size_um = 0.16,
+    start_frame = 0,
+    dim = 2,
+    condition_col = None,
+    max_traj_len = None,
+):
+    '''
+    Convenience function to compile displacements from trajectories
+    in one of several formats.
+
+    *trajs* may be:
+
+        - a dataframe of localizations assigned to trajectories
+          in the `traj_idx` column
+
+        - a .TXT file with the `traj_idx` column
+
+        - a .trajs or .locs file (TXT with tracking metadata,
+          readable by spazio.load_locs)
+
+        - a *Tracked.mat file (MATLAB trajectory format)
+
+        - a list of files of the types above
+
+        - a directory containing *.locs, *.trajs, or *Tracked.mat
+          files
+
+    args
+        trajs               :   one of the inputs above
+
+        n_gaps              :   int, the number of gaps allowed
+                                during tracking
+
+        n_dt                :   int, the number of time delays to 
+                                compute for the radial displacement
+                                histograms. For instance, if n_dt = 4,
+                                then will compute dt = 0.00548 out to
+                                dt = 0.00548 * 4 = 0.02192
+
+        max_disp            :   float, the maximum displacement to 
+                                compile in um
+
+        n_bins              :   int, the number of distinct radial
+                                displacement bins to compute
+
+        pixel_size_um       :   float, size of camera pixels in um
+
+        start_frame         :   int, exclude all trajectories before
+                                this
+
+        dim                 :   int, the number of spatial dimensions
+                                over which to compute displacements 
+                                (1 or 2)
+
+        condition_col       :   str, a boolean column in the input
+                                dataframe. Take only trajectories that
+                                have this column == True. Only meaningful
+                                when the input is dataframe-like (not
+                                *Tracked.mat format)
+
+    returns
+        (
+            2D ndarray of shape (n_bins - 1, n_dt), the radial
+                displacement histograms;
+            1D ndarray of shape (n_bins,), the edges of the radial
+                displacement bins
+        )
+
+    '''
+    if isinstance(trajs, str):
+
+        # Input is a directory
+        if os.path.isdir(trajs):
+
+            # Get the list of files in those directories
+            tracked_mat_file_list = glob("%s/*Tracked.mat" % trajs)
+            traj_file_list = glob("%s/*.trajs" % trajs)
+
+            # Compile displacements from the *Tracked.mat files in that
+            # directory
+            if len(tracked_mat_file_list) > 0:
+                radial_disp_histograms, bin_edges = compile_displacements_tracked_mat(
+                    trajs,
+                    n_bins = n_bins,
+                    max_displacement = max_disp,
+                    n_dt = n_dt,
+                    max_traj_len = max_traj_len,
+                )
+                return radial_disp_histograms, bin_edges
+
+            # Compile displacements from the *.trajs files that 
+            # directory
+            elif len(traj_file_list) > 0:
+                radial_disp_histograms, bin_edges = compile_displacements_directory(
+                    traj_file_list,
+                    n_bins = n_bins,
+                    max_disp = max_disp,
+                    time_delays = n_dt,
+                    max_traj_len = max_traj_len,
+                    traj_col = 'traj_idx',
+                    y_col = 'y_pixels',
+                    x_col = 'x_pixels',
+                    dim = dim,
+                    start_frame = start_frame,
+                    condition_col = condition_col,
+                )
+                return radial_disp_histograms, bin_edges
+
+        # Input is a file
+        elif os.path.isfile(trajs):
+
+            if 'Tracked.mat' in trajs:
+                radial_disp_histograms, bin_edges = compile_displacements_tracked_mat(
+                    trajs,
+                    n_bins = n_bins,
+                    max_displacement = max_disp,
+                    n_dt = n_dt,
+                    max_traj_len = max_traj_len,
+                )
+                return radial_disp_histograms, bin_edges 
+
+            elif '.trajs' in trajs:
+                locs, metadata = spazio.load_locs(trajs)
+                radial_disp_histograms, bin_edges = compile_displacements_trajs(
+                    locs,
+                    n_bins = n_bins,
+                    max_disp = max_disp,
+                    time_delays = n_dt,
+                    max_traj_len = max_traj_len,
+                    traj_col = 'traj_idx',
+                    y_col = 'y_pixels',
+                    x_col = 'x_pixels',
+                    dim = dim,
+                    start_frame = start_frame,
+                    condition_col = condition_col,
+                )
+                return radial_disp_histograms, bin_edges
+
+        else:
+            raise RuntimeError('traj_analysis.compile_displacements: string input %s not recognized as a directory or file path' % trajs)
+
+    # Input is not a path
+    else:
+
+        # Input is a dataframe
+        if isinstance(trajs, pd.DataFrame):
+            radial_disp_histograms, bin_edges = compile_displacements_trajs(
+                trajs,
+                n_bins = n_bins,
+                max_disp = max_disp,
+                time_delays = n_dt,
+                max_traj_len = max_traj_len,
+                traj_col = 'traj_idx',
+                y_col = 'y_pixels',
+                x_col = 'x_pixels',
+                dim = dim,
+                start_frame = start_frame,
+                condition_col = condition_col,
+            )
+
+        # Does not recognize other inputs
+        else:
+            raise RuntimeError('traj_analysis.compile_displacements: input must either be a file path or a pandas.DataFrame')
+
+
+
+
+def compile_displacements_trajs(
+    trajs,
+    n_gaps = 0,
     time_delays = 4,
     traj_col = 'traj_idx',
     frame_col = 'frame_idx',
@@ -100,6 +276,7 @@ def compile_displacements(
     start_frame = 0,
     dim = 2,
     condition_col = None,
+    max_traj_len = None,
 ):
     '''
     Compile radial displacements from a given dataframe into
@@ -155,6 +332,7 @@ def compile_displacements(
     if any([c not in trajs.columns for c in required_cols]):
         raise RuntimeError('traj_analysis.compile_displacements: input dataframe must contain the columns %s' % ', '.join(required_cols))
 
+    # Can only compile displacements in 1 or 2 dimensions
     assert dim in [1, 2]
 
     # Make the sequence of radial displacement bins
@@ -170,6 +348,11 @@ def compile_displacements(
 
     # Take only displacements after the start frame
     df = df.loc[df['frame_idx'] >= start_frame]
+
+    # If desired, filter out long trajectories
+    if not (max_traj_len is None):
+        df = df.join(df.groupby('traj_idx').size().rename('traj_len'), on = 'traj_idx')
+        df = df[df['traj_len'] <= max_traj_len]
 
     if not (condition_col is None):
         df = df.loc[df[condition_col]]
@@ -265,7 +448,7 @@ def compile_displacements_directory(
 
         locs = pd.concat([locs, locs_2], ignore_index = True, sort = False)
 
-    if 'condition_col' in kwargs:
+    if ('condition_col' in kwargs) and not (kwargs['condition_col'] is None):
         locs = traj_mask_membership(locs, kwargs['condition_col'], 'traj_in_mask')
         kwargs['condition_col'] = 'traj_in_mask'
     
@@ -274,7 +457,7 @@ def compile_displacements_directory(
     locs.index = np.arange(len(locs))
 
     # Compile radial displacement histograms
-    histograms, bin_edges = compile_displacements(
+    histograms, bin_edges = compile_displacements_trajs(
         locs,
         **kwargs,
     )
@@ -289,9 +472,7 @@ def compile_displacements_tracked_mat(
     max_traj_len = None,
 ):
     if os.path.isdir(tracked_mat_file_or_directory):
-        file_list = ['%s/%s' % (tracked_mat_file_or_directory, i) \
-            for i in os.listdir(tracked_mat_file_or_directory) \
-            if 'Tracked.mat' in i]
+        file_list = glob("%s/*Tracked.mat" % tracked_mat_file_or_directory)
     elif os.path.isfile(tracked_mat_file_or_directory):
         file_list = [tracked_mat_file_or_directory]
     else:
@@ -343,6 +524,8 @@ def fit_radial_disp_model(
     plot = True,
     out_png = None,
     pdf_plot_max_r = 1.0,
+    figsize_mod = 1.0,
+    exp_bin_size = 0.04,
     **model_kwargs,
 ):
     '''
@@ -458,7 +641,7 @@ def fit_radial_disp_model(
             model_bin_centers[:,0],
             delta_t,
             color_palette = 'magma',
-            figsize_mod = 1.0,
+            figsize_mod = figsize_mod,
             out_png = out_png_cdf,
         )
 
@@ -470,13 +653,13 @@ def fit_radial_disp_model(
             model_bin_centers[:,0],
             delta_t,
             max_r = pdf_plot_max_r,
-            exp_bin_size = 0.04,
-            figsize_mod = 1.0,
+            exp_bin_size = exp_bin_size,
+            figsize_mod = figsize_mod,
             out_png = out_png_pdf,
             #ax = ax,
         )
         
-    return popt, pcov, ax
+    return popt, pcov
 
 # 
 # Fitting utilities
@@ -537,6 +720,7 @@ def _fit_from_initial_guesses(
     initial_guess_bounds = None,
     initial_guess_n = None,
     fit_bounds = None,
+    verbose = False,
 ):
     '''
     Generate an array of initial guesses and do iterative
@@ -600,7 +784,7 @@ def _fit_from_initial_guesses(
         )
         sum_sq_err[g_idx] = ((_model(r_dt, *popt) - ext_cdf)**2).sum()
 
-    print(list(sum_sq_err))
+    if verbose: print(list(sum_sq_err))
 
     # Identify the guess with the minimum sum of squares
     m_idx = np.argmin(sum_sq_err)
@@ -1535,12 +1719,12 @@ DEFAULTS = {
     'two_state_brownian_zcorr' : {
         'initial_guess_bounds' : (
             np.array([0, 0.2, 0.0]),
-            np.array([1.0, 20.0, 0.05]),
+            np.array([1.0, 20.0, 0.01]),
         ),
         'initial_guess_n' : (5, 5, 1),
         'fit_bounds' : (
             np.array([0.0, 0.2, 0.0]),
-            np.array([1.0, 50.0, 0.1]),
+            np.array([1.0, 50.0, 0.02]),
         ),
     },
     'two_state_brownian_zcorr_gapless' : {
