@@ -9,3 +9,4 @@ import pyspaz.track
 import pyspaz.mask
 import pyspaz.interpolate_mask
 import pyspaz.qc
+import pyspaz.traj_analysis
