@@ -37,7 +37,7 @@ def track_locs_directory(
     directory_name,
     out_dir = None,
     output_format = 'txt',
-    **kwargs
+    **kwargs,
 ):
     '''
     Track all of the *.locs files in a given directory.

@@ -49,7 +49,169 @@ def add_locs_per_frame(locs, frame_col = 'frame_idx'):
         pandas.DataFrame with the new 'locs_per_frame' column
 
     '''
+    if 'locs_per_frame' in locs.columns:
+        locs = locs.drop('locs_per_frame', axis = 1)
+
     return locs.join(locs.groupby(frame_col).size().rename('locs_per_frame'), on=frame_col)
+
+def add_trajectory_length(trajs, traj_col='traj_idx'):
+    """
+    Calculate trajectory length for each trajectory in a 
+    dataframe and add as a column to the dataframe.
+
+    args
+    ----
+        trajs :  pandas.DataFrame
+        traj_col :  str
+
+    returns
+    -------
+        pandas.DataFrame
+
+    """
+    if 'traj_len' in trajs.columns:
+        trajs = trajs.drop('traj_len', axis = 1)
+
+    return trajs.join(
+        trajs.groupby(traj_col).size().rename('traj_len'), on = traj_col
+    )
+
+
+def concat_trajs(*trajs, traj_col='traj_idx'):
+    """
+    Concatenate a set of localization dataframes while
+    changing the `traj_idx` index so that each trajectory
+    has a unique index.
+
+    args
+    ----
+        *trajs :  set of pandas.DataFrame, output of 
+            `track.track_locs` or similar
+
+    returns
+    -------
+        pandas.DataFrame, the concatenated trajectoreis
+
+    """
+    n = len(trajs)
+
+    # Iterative concatenate each dataframe to the first
+    # while incrementing the trajectory index
+    out = trajs[0].assign(dataframe_idx=0)
+    c_idx = out[traj_col].max() + 1
+
+    for i in range(1, n):
+
+        # Get the next set of trajectories and keep track of the
+        # origin dataframe
+        new = trajs[i].assign(dataframe_idx=i)
+
+        # Trajectory indices of -1 indicate a reconnection error;
+        # leave these untouched
+        new.loc[new[traj_col] >= 0, traj_col] += c_idx
+
+        # Increment the total number of trajectories
+        c_idx = new[traj_col].max() + 1
+
+        # Concatenate trajectories
+        out = pd.concat([out, new], ignore_index=True, sort=False)
+
+    return out
+
+def fast_jump_lengths_unbinned(trajs, max_r=5.0, time_delays=4, pixel_size_um=0.16):
+    """
+    Compute jump lengths for a set of trajectories without
+    gaps and return the raw displacements without binning.
+
+    Parameters
+    ----------
+        trajs :  pandas.DataFrame
+        max_r :  float
+        time_delays :  int
+        pixel_size_um :  float
+
+    Returns
+    -------
+        dict{ time_delay : 1D ndarray }, the set of
+            radial displacements for each frame interval
+
+    """
+    # Filter out unassigned localizations
+    subtrajs = trajs[trajs["traj_idx"] >= 1]
+
+    # Get trajectory lengths
+    subtrajs = add_trajectory_length(subtrajs)
+
+    # Take only trajectories with multiple points
+    subtrajs = subtrajs[subtrajs["traj_len"] > 1]
+
+    # Format as ndarray for speed
+    subtrajs = np.asarray(subtrajs[["frame_idx", "traj_idx", "y_pixels", "x_pixels"]])
+
+    # Convert pixels to um
+    subtrajs[:, 2:] *= pixel_size_um
+
+    # Sort by trajectory -> frame
+    subtrajs = subtrajs[np.lexsort((subtrajs[:, 0], subtrajs[:, 1]))]
+
+    # Determine the maximum number of frame gaps present
+    diff = subtrajs[1:, :] - subtrajs[:-1, :]
+    allowed_gaps = max([0, diff[diff[:, 1] == 0, 0].max() - 1])
+
+    # For each time delay, calculate the histogram of displacements
+    out = {t: np.array([]) for t in range(1, time_delays + 1)}
+    for t in range(1, time_delays + 1):
+        for g in range(2 * (int(allowed_gaps) + 1) + 1):
+
+            # Get displacements
+            diff = subtrajs[(t + g) :, :] - subtrajs[: -(t + g), :]
+
+            # Take only displacements originating from the same trajectory
+            # and from the correct frame gap
+            diff = diff[(diff[:, :2] == np.array([t, 0])).all(1), :]
+
+            # Compute radial displacements
+            out[t] = np.concatenate((out[t], np.sqrt((diff[:, 2:] ** 2).sum(1))))
+
+    return out
+
+def fast_jump_lengths(trajs, max_r=5.0, n_bins=5000, time_delays=4, pixel_size_um=0.16):
+    """
+    Compile histograms of jump lengths for a set of trajectories.
+
+    Parameters
+    ----------
+        trajs :  pandas.DataFrame, locs with `traj_idx` col
+        max_r :  float, max jump length to consider
+        n_bins :  int, number of bins between 0 and max_r
+        time_delays :  int. Each time delay is compiled as 
+                a separate distribution
+        pixel_size_um :  float
+
+    Returns
+    -------
+        (
+            2D ndarray of shape (n_bins, time_delays), the 
+                histograms;
+            1D ndarray of shape (n_bins + 1,), the edges of
+                each jump length bin
+        )
+    
+    """
+    # Get the raw displacements
+    jump_lengths = fast_jump_lengths_unbinned(
+        trajs, max_r=max_r, time_delays=time_delays, pixel_size_um=pixel_size_um
+    )
+
+    # Make the binning array
+    bin_edges = np.linspace(0, max_r, n_bins + 1)
+
+    # Compile histograms
+    radial_disp_histograms = np.empty((n_bins, time_delays), dtype="int64")
+    for t in range(1, time_delays + 1):
+        radial_disp_histograms[:, t - 1] = np.histogram(jump_lengths[t], bins=bin_edges)[0]
+
+    return radial_disp_histograms, bin_edges
 
 def traj_mask_membership(locs, mask_col, traj_mask_col, rule = 'any', traj_col = 'traj_idx'):
     '''
