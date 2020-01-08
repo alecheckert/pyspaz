@@ -821,7 +821,7 @@ def fit_radial_disp_model(
             #ax = ax,
         )
         
-    return popt, pcov
+    return popt, pcov, MODELS[model]['par_names']
 
 # 
 # Fitting utilities
@@ -1832,46 +1832,57 @@ MODELS = {
     'two_state_brownian_zcorr' : {
         'cdf' : cdf_two_state_brownian_zcorr,
         'pdf' : pdf_two_state_brownian_zcorr,
+        'par_names' : ['fraction_bound', 'diff_coef_free', 'diff_coef_bound'],
     },
     'two_state_brownian_zcorr_gapless' : {
         'cdf' : cdf_two_state_brownian_zcorr_gapless,
         'pdf' : pdf_two_state_brownian_zcorr_gapless,
+        'par_names' : ['fraction_bound', 'diff_coef_free', 'diff_coef_bound'],
     },
     'one_state_brownian' : {
         'cdf' : cdf_one_state_brownian,
         'pdf' : pdf_one_state_brownian,
+        'par_names' : ['diff_coef'],
     },
     'one_state_brownian_on_fractal' : {
         'cdf' : cdf_one_state_brownian_on_fractal,
         'pdf' : pdf_one_state_brownian_on_fractal,
+        'par_names' : ['diff_coef', 'fractal_dim'],
     },
     'two_state_brownian_on_fractal' : {
         'cdf' : cdf_two_state_brownian_on_fractal,
         'pdf' : pdf_two_state_brownian_on_fractal,
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free'],
     },
     'one_state_subdiffusion_on_fractal' : {
         'cdf' : cdf_one_state_subdiffusion_on_fractal,
         'pdf' : pdf_one_state_subdiffusion_on_fractal,
+        'par_names' : ['diff_coef', 'fractal_dim', 'walk_dim'],
     },
     'two_state_subdiffusion_on_fractal_zcorr' : {
         'cdf' : cdf_two_state_subdiffusion_on_fractal_zcorr,
         'pdf' : pdf_two_state_subdiffusion_on_fractal_zcorr,
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim', 'walk_dim'],
     },
     'two_state_subdiffusion_on_fractal' : {
         'cdf' : cdf_two_state_subdiffusion_on_fractal,
         'pdf' : pdf_two_state_subdiffusion_on_fractal,
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim', 'walk_dim'],
     },
     'two_state_oshaughnessy' : {
         'cdf' : cdf_two_state_oshaughnessy,
         'pdf' : pdf_two_state_oshaughnessy,
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim', 'walk_dim'],
     },
     'three_state_brownian' : {
         'cdf' : cdf_three_state_brownian,
         'pdf' : pdf_three_state_brownian,
+        'par_names' : ['fraction_bound', 'fraction_diff_free_1', 'diff_coef_bound', 'diff_coef_free_1', 'diff_coef_free2'],
     },
     'two_state_brownian' : {
         'cdf' : cdf_two_state_brownian,
         'pdf' : pdf_two_state_brownian,
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free'],
     },
 }
 
