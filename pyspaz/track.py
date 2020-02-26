@@ -106,7 +106,8 @@ def track_locs(
     start_frame = None,
     stop_frame = None,
     output_format = 'txt',
-    algorithm_type = 'full',
+    algorithm_type = 'diffusion_only',
+    progress_bar = True,
 ):
     '''
     Main tracking function for localizations.
@@ -254,7 +255,12 @@ def track_locs(
 
     # Iterate through the rest of the frames, saving trajectories
     # as we go.
-    for frame_idx in tqdm(range(start_frame + 1, n_frames + 1)):
+    if progress_bar:
+        frames_iter = tqdm(range(start_frame+1, n_frames+1))
+    else:
+        frames_iter = range(start_frame+1, n_frames+1)
+
+    for frame_idx in frames_iter:
 
         # Get all localizations in this frame
         frame_locs = locs[locs[:,0] == frame_idx, :]

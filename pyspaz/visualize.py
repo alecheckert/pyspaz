@@ -133,7 +133,7 @@ def loc_density(
         if (ax == None):
             fig, ax = plt.subplots(figsize = (4, 4))
             ax.imshow(
-                density[::-1,:],
+                density.T[::-1,:],
                 cmap=cmap,
                 vmax=density.mean() + density.std() * vmax_mod,
             )
@@ -142,7 +142,7 @@ def loc_density(
             wrapup(out_png)
         else:
             ax.imshow(
-                density[::-1,:],
+                density.T[::-1,:],
                 cmap=cmap,
                 vmax=density.mean() + density.std() * vmax_mod,
             )
@@ -708,7 +708,8 @@ def overlay_trajs_interactive(
             white_out_singlets = white_out_singlets,
         )
     elif type(trajs) == type('') and ('.trajs' in trajs or '.txt' in trajs):
-        out_tif = '%s_overlay.tif' % os.path.splitext(trajs)[0]
+        #out_tif = '%s_overlay.tif' % os.path.splitext(trajs)[0]
+        out_tif = 'default_traj_overlay.tif'
         trajs, metadata = spazio.load_locs(trajs)
         print(trajs.columns)
         overlay_trajs_df(
@@ -823,6 +824,7 @@ def overlay_locs_interactive(
     nd2_file,
     vmax_mod = 0.5,
     continuous_update = False,
+    figsize_mod = 1.0,
 ):
     # Load the ND2 file
     reader = spazio.ImageFileReader(nd2_file)
@@ -835,7 +837,7 @@ def overlay_locs_interactive(
 
     # Define the update function
     def update(frame_idx):
-        fig, ax = plt.subplots(1, 2, figsize = (12, 6))
+        fig, ax = plt.subplots(1, 2, figsize = (12*figsize_mod, 6*figsize_mod))
         for j in range(2):
             ax[j].imshow(
                 reader.get_frame(frame_idx),
@@ -863,6 +865,7 @@ def optimize_detection_interactive(
     image_file,
     offset_by_half = False,
     vmax_mod = 1.0,
+    figsize_mod = 1.0,
 ):
     reader = spazio.ImageFileReader(image_file)
     N, M, n_frames = reader.get_shape()
@@ -881,7 +884,7 @@ def optimize_detection_interactive(
         im_max = plot_image.max()
         for pos_idx in range(detect_positions.shape[0]):
             y, x = detect_positions[pos_idx, :].astype('uint16') + 1
-            for i in range(-2, 3):
+            for i in range(-4, 5):
                 try:
                     plot_image[y+i,x] = im_max 
                 except IndexError:
@@ -891,7 +894,7 @@ def optimize_detection_interactive(
                 except IndexError:
                     pass 
 
-        fig, ax = plt.subplots(2, 2, figsize = (16, 16))
+        fig, ax = plt.subplots(2, 2, figsize = (12*figsize_mod, 12*figsize_mod))
         ax[0,0].imshow(
             image, cmap = 'gray', vmax = image.max() * vmax_mod 
         )
@@ -1609,6 +1612,61 @@ def plot_cdf_with_model_from_histogram(
         wrapup(out_png, dpi = 600)
     else:
         plt.tight_layout(); plt.show(); plt.close()
+
+def spot_montage(
+    nd2_file,
+    locs,
+    start_frame,
+    spots_per_edge = 5,
+    window_size = 17,
+):
+    """
+    Show a montage of individual localizations.
+
+    args
+    ----
+        nd2_file :  str
+        locs :  pandas.DataFrame
+        start_frame :  int
+        spots_per_edge :  int
+        window_size :  int
+
+    returns
+    -------
+        None
+
+    """
+    half_w = int(window_size)//2
+    n_spots = spots_per_edge ** 2
+
+    sublocs = locs[locs['frame_idx'] >= start_frame][['frame_idx', 'y_pixels', 'x_pixels']].iloc[:n_spots]
+
+    reader = spazio.ImageFileReader(nd2_file)
+
+    fig, ax = plt.subplots(spots_per_edge, spots_per_edge, figsize = (6, 6))
+    c_idx = 0
+
+    for frame_idx, frame_locs in sublocs.groupby('frame_idx'):
+        frame = reader.get_frame(frame_idx)
+
+        for spot_idx in frame_locs.index:
+            yc, xc = frame_locs.loc[spot_idx, ['y_pixels', 'x_pixels']].astype('int64')
+            psf_image = frame[
+                yc-half_w : yc+half_w+1,
+                xc-half_w : xc+half_w+1,
+            ]
+            ax_y = c_idx // spots_per_edge 
+            ax_x = c_idx % spots_per_edge 
+
+            ax[ax_y, ax_x].imshow(psf_image, cmap='gray')
+            ax[ax_y, ax_x].set_xticks([])
+            ax[ax_y, ax_x].set_yticks([])
+            c_idx += 1
+
+    plt.show(); plt.close()
+
+
+
 
 
 

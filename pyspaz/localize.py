@@ -701,10 +701,21 @@ def detect_and_localize_file(
     if type(frames_to_do) != type(np.array([])):
         frames_to_do = list(range(start_frame, stop_frame + 1))
 
-    for frame_idx in frames_to_do:
+    if progress_bar:
+        frames_to_do_iter = tqdm(frames_to_do)
+    else:
+        frames_to_do_iter = frames_to_do
+
+    for frame_idx in frames_to_do_iter:
         
         # Get the image corresponding to this frame from the reader
         image = reader.get_frame(frame_idx).astype('float64')
+
+        # Sometimes NIS-Elements records bad frames - incomplete,
+        # or otherwise the wrong shape. Skip these.
+        if len(image.shape) != 2 or image.shape != (N, M):
+            print('Error in file %s: frame %d looks wrong; skipping...' % (file_name, frame_idx))
+            continue 
         
         # Perform the convolutions required for the LL detection test
         A = uniform_filter(image, window_size) * n_pixels

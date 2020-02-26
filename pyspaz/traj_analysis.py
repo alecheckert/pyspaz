@@ -76,6 +76,29 @@ def add_trajectory_length(trajs, traj_col='traj_idx'):
         trajs.groupby(traj_col).size().rename('traj_len'), on = traj_col
     )
 
+def truncate_trajs(trajs, max_traj_len, remove_unassigned=True):
+    """
+    Truncate trajectories up to a specific number of 
+    localizations.
+
+    args
+    ----
+        trajs :  pandas.DataFrame
+        max_traj_len :  int
+        remove_unassigned :  bool, remove localizations
+            with traj_idx 0 (unassigned to any trajectory)
+
+    returns
+    -------
+        pandas.DataFrame, truncated trajectories
+
+    """
+    _t = trajs.copy()
+    if remove_unassigned: _t = _t[_t['traj_idx'] > 0]
+    _t['one'] = 1
+    _t['loc_idx_by_traj'] = _t.groupby('traj_idx')['one'].cumsum()
+    _t = _t[_t['loc_idx_by_traj'] <= max_traj_len]
+    return _t.drop('one', axis = 1)
 
 def concat_trajs(*trajs, traj_col='traj_idx'):
     """
@@ -117,6 +140,94 @@ def concat_trajs(*trajs, traj_col='traj_idx'):
         out = pd.concat([out, new], ignore_index=True, sort=False)
 
     return out
+
+def displacement_df(loc_df, compute_angles=True):
+    """
+    Convert a dataframe of localizations into a dataframe of 
+    displacements. This is similar to the input dataframe, 
+    except it contains the additional columns `y_delta` and
+    `x_delta` that give the direction of motion over the 
+    NEXT frame interval.
+
+    Because it has no next frame interval, the last loc
+    of each trajectory is dropped.
+
+    Parameters
+    ----------
+        loc_df :  pandas.DataFrame, for instance the output
+            of track.track_locs
+
+    Returns
+    -------
+        pandas.DataFrame
+
+    """
+    # Work with a copy of the original dataframe as we 
+    # transform it into a displacement dataframe
+    disps = loc_df.copy()
+
+    # Remove all single localizations
+    disps = add_trajectory_length(disps)
+    disps = disps[disps['traj_len'] > 1]
+
+    # Remove localizations that were not connected by
+    # the tracking algorithm (these have index 0)
+    disps = disps[disps['traj_idx'] > 0]
+
+    # Reindex
+    disps.index = np.arange(len(disps))
+
+    # Take difference
+    disps['y_delta'] = -disps.groupby('traj_idx')['y_pixels'].diff(-1)
+    disps['x_delta'] = -disps.groupby('traj_idx')['x_pixels'].diff(-1)
+
+    # Exclude the last position of each trajectory
+    disps = disps[~pd.isnull(disps['y_delta'])]
+
+    # If desired, also compute the angle of each displacement
+    # on the half plane (between 0 and np.pi)
+    if compute_angles:
+        disps['r'] = np.sqrt(disps['y_delta']**2 + disps['x_delta']**2)
+        disps['yr'] = disps['y_delta'] / disps['r']
+        disps['xr'] = disps['x_delta'] / disps['r']
+        disps['theta'] = np.arccos(disps['xr'])
+
+        # For all angles > pi, invert through the origin
+        cond_0 = disps['yr'] < 0.0
+        disps.loc[cond_0.index, 'theta'] = np.pi - disps.loc[cond_0.index, 'theta']
+
+    return disps 
+
+def assign_loc_idx_in_traj(trajs):
+    """
+    For each trajectory, assign a separate localization 
+    index to each localization: 0 for the first localization
+    in that trajectory, 1 for the second localization in 
+    that trajectory, and so on. This is stored in the 
+    `loc_idx_in_traj` column.
+
+    Parameters
+    ----------
+        trajs : pd.DataFrame
+
+    Returns
+    -------
+        pandas.DataFrame
+
+    """
+    trajs['loc_idx'] = np.arange(len(trajs))
+    trajs.index = np.arange(len(trajs))
+    D = np.asarray(trajs[['loc_idx', 'traj_idx', 'frame_idx']])
+    D = D[np.lexsort((D[:,2], D[:,1]))]
+    traj_indices = np.unique(D[:,1])
+    loc_idx_in_traj = np.zeros(D.shape[0], dtype='int64')
+    for traj_idx in tqdm(traj_indices):
+        in_traj = D[:,1] == traj_idx 
+        loc_idx_in_traj[in_traj] = np.arange(in_traj.sum())
+    loc_idx_in_traj = pd.Series(loc_idx_in_traj, index=D[:,0])
+    trajs['loc_idx_in_traj'] = loc_idx_in_traj
+    return trajs 
+
 
 def fast_jump_lengths_unbinned(trajs, max_r=5.0, time_delays=4, pixel_size_um=0.16):
     """
@@ -212,6 +323,94 @@ def fast_jump_lengths(trajs, max_r=5.0, n_bins=5000, time_delays=4, pixel_size_u
         radial_disp_histograms[:, t - 1] = np.histogram(jump_lengths[t], bins=bin_edges)[0]
 
     return radial_disp_histograms, bin_edges
+
+def fast_jump_lengths_split(
+    trajs,
+    max_r=5.0,
+    n_bins=5000,
+    time_delays=4,
+    pixel_size_um=0.16,
+):
+    """
+    Wrapper for fast_jump_lengths() on very large datasets which 
+    are difficult to compute in a single binning step. This splits
+    the trajectories into groups of 1000 and then compiles the 
+    results for each group, accumulating as we go.
+
+    Parameters
+    ----------
+        dfs :  pandas.DataFrame objects, the trajectories
+        kwargs :  to fast_jump_lengths()
+
+    Returns
+    -------
+        (
+            2D ndarray of shape (n_bins, time_delays), the 
+                histograms;
+            1D ndarray of shape (n_bins + 1,), the edges of
+                each jump length bin
+        )
+    
+    """
+    # Get rid of unassigned localizations
+    trajs = trajs[trajs['traj_idx'] > 0]
+
+    # Add a new column representing the absolute trajectory index
+    traj_indices = np.unique(trajs['traj_idx'])
+    new_traj_indices = np.arange(len(traj_indices))
+    trajs['new_traj_idx'] = trajs['traj_idx'].apply(
+        lambda x : new_traj_indices[np.argwhere(traj_indices==x)[0,0]]
+    )
+
+    # Split the problem into groups of 1000 trajectories
+    trajs['group_idx'] = trajs['traj_idx'] % 1000
+
+    result = np.zeros((n_bins, time_delays), dtype='int64')
+    for group_idx, group_trajs in tqdm(trajs.groupby('group_idx')):
+        group_result, bin_edges = fast_jump_lengths(
+            group_trajs, max_r=max_r, n_bins=n_bins,
+            time_delays=time_delays,
+            pixel_size_um=pixel_size_um,
+        )
+        result = result + group_result.copy()
+
+    return result, bin_edges 
+
+
+
+
+
+# def fast_jump_lengths_split(*dfs, max_r=5.0, n_bins=5000,
+#     time_delays=4, pixel_size_um=0.16):
+#     """
+#     Wrapper for fast_jump_lengths() on very large datasets which 
+#     are difficult to compute in a single binning step.
+
+#     Parameters
+#     ----------
+#         dfs :  pandas.DataFrame objects, the trajectories
+#         kwargs :  to fast_jump_lengths()
+
+#     Returns
+#     -------
+#         (
+#             2D ndarray of shape (n_bins, time_delays), the 
+#                 histograms;
+#             1D ndarray of shape (n_bins + 1,), the edges of
+#                 each jump length bin
+#         )
+    
+#     """
+#     result = np.zeros((n_bins, time_delays), dtype='float64')
+#     for df_idx, df in tqdm(enumerate(dfs)):
+#         r_disps, bin_edges = fast_jump_lengths(
+#             df, max_r=max_r, n_bins=n_bins,
+#             time_delays=time_delays, pixel_size_um=pixel_size_um
+#         )
+#         result = result + r_disps 
+#     return result, bin_edges  
+
+
 
 def traj_mask_membership(locs, mask_col, traj_mask_col, rule = 'any', traj_col = 'traj_idx'):
     '''
@@ -882,7 +1081,7 @@ def _fit_from_initial_guesses(
     initial_guess_bounds = None,
     initial_guess_n = None,
     fit_bounds = None,
-    verbose = False,
+    verbose = True,
 ):
     '''
     Generate an array of initial guesses and do iterative
@@ -1852,7 +2051,7 @@ MODELS = {
     'two_state_brownian_on_fractal' : {
         'cdf' : cdf_two_state_brownian_on_fractal,
         'pdf' : pdf_two_state_brownian_on_fractal,
-        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free'],
+        'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim'],
     },
     'one_state_subdiffusion_on_fractal' : {
         'cdf' : cdf_one_state_subdiffusion_on_fractal,
@@ -1864,7 +2063,7 @@ MODELS = {
         'pdf' : pdf_two_state_subdiffusion_on_fractal_zcorr,
         'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim', 'walk_dim'],
     },
-    'two_state_subdiffusion_on_fractal' : {
+    'two_state_subdiffusion_on_fractal_zcorr' : {
         'cdf' : cdf_two_state_subdiffusion_on_fractal,
         'pdf' : pdf_two_state_subdiffusion_on_fractal,
         'par_names' : ['fraction_bound', 'diff_coef_bound', 'diff_coef_free', 'fractal_dim', 'walk_dim'],
@@ -1936,9 +2135,9 @@ DEFAULTS = {
     'two_state_brownian_on_fractal' : {
         'initial_guess_bounds' : (
             np.array([0.0, 0.0, 0.2, 0.5]),
-            np.array([1.0, 0.1, 100.0, 3.0]),
+            np.array([1.0, 0.01, 100.0, 3.0]),
         ),
-        'initial_guess_n' : np.array([5, 1, 3, 5]),
+        'initial_guess_n' : np.array([4, 1, 3, 4]),
         'fit_bounds' : (
             np.array([0.0, 0.0, 0.2, 0.5]),
             np.array([1.0, 0.1, 100.0, 3.0]),
