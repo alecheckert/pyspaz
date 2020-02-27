@@ -21,6 +21,12 @@ from nd2reader import ND2Reader
 # TIF reading
 import tifffile
 
+# Get the list of files in a given directory
+from glob import glob 
+
+# Progress bar
+from tqdm import tqdm 
+
 def save_locs(locs_file, locs_df, metadata):
     '''
     Save a pandas.DataFrame containing localizations
@@ -137,6 +143,128 @@ def load_trajs(filename, unpack_cols = True):
 
     else:
         raise RuntimeError('spazio.load_trajs: input file must be either *Tracked.mat or *.txt/*.trajs')
+
+def trajs_to_tracked_mat_directory(
+    directory_with_traj_files,
+    out_dir=None,
+    matlabexec = '/Applications/MATLAB_R2014b.app/bin/matlab',
+    run_conversion=True,
+):
+    """
+    For every *.trajs file in a given directory, convert
+    to *Tracked.mat format. This attempts to 
+
+    args
+    ----
+        directory_with_traj_files :  str, path to directory
+                                    containing *.trajs files
+        out_dir :  str, file to save the resulting *Tracked.mat
+            files to
+
+    returns
+    -------
+        None
+
+    """
+
+    # Get all *.trajs files in this directory
+    traj_files = glob("%s/*.trajs" % directory_with_traj_files)
+
+    # Specify output directory
+    if out_dir is None:
+        out_dir = directory_with_traj_files
+
+    # Create output directory, if doesn't exist
+    if not os.path.isdir(out_dir):
+        os.mkdir(out_dir)
+
+    # Run on every individual *.trajs file
+    for traj_file_idx, traj_file in tqdm(enumerate(traj_files)):
+
+        # Generate output file name
+        out_tracked_mat = '%s/%s' % (
+            out_dir, os.path.basename(traj_file).replace('.trajs', '_Tracked.mat')
+        )
+
+        # Save to that file name
+        trajs_to_tracked_mat(
+            traj_file,
+            out_tracked_mat,
+        )
+
+    # Do hard file conversion from within MATLAB. 
+    # this requires a little trickery (aka bullshit)
+    if run_conversion:
+        import imp 
+        curr_dir = os.getcwd()
+        os.chdir(out_dir)
+        convert_trajs_to_mat_path = '%s/convert_trajs_to_mat.m' % imp.find_module('pyspaz')[1]
+        os.system('cp %s convert_trajs_to_mat.m' % convert_trajs_to_mat_path)
+        os.system('%s -r -nodesktop -nosplash -nodisplay convert_trajs_to_mat' % matlabexec)
+        os.chdir(curr_dir)
+
+def trajs_to_tracked_mat(
+    in_trajs_file,
+    out_tracked_mat,
+):
+    """
+    Convert a .trajs (.locs format)-formatted file 
+    into a *Tracked.mat file.
+
+    args
+    ----
+        in_trajs_file :  str
+        out_tracked_mat :  str
+
+    returns
+    -------
+
+    """
+    # Load trajectories into file
+    trajs, metadata = load_locs(in_trajs_file)
+
+    # Convert to MATLAB indexing
+    trajs['frame_idx'] = trajs['frame_idx'] + 1
+
+    # Exclude unassigned localizations
+    trajs = trajs[trajs['traj_idx'] > 0]
+
+    # Add timestamp column
+    try:
+        frame_interval_sec = metadata['frame_interval_sec']
+    except KeyError:
+        frame_interval_sec = 0.00
+    trajs['time'] = trajs['frame_idx'] * frame_interval_sec
+
+    # Convert to np.ndarray for faster indexing
+    trajs = np.asarray(trajs[['frame_idx', 'time', 'y_pixels',
+        'x_pixels', 'traj_idx']])
+
+    # Convert from pixels to um
+    pixel_size_um = metadata['pixel_size_um']
+    trajs[:,2:4] = trajs[:,2:4] * pixel_size_um 
+
+    # Convert to the expected MATLAB format
+    result_list = []
+    unique_traj_indices = np.unique(trajs[:,4]).astype('int64')
+    for traj_idx in unique_traj_indices:
+        traj = trajs[trajs[:,4] == traj_idx]
+
+        result_list.append([
+            traj[:,2:4],  # position
+            traj[:,0],  # frame index
+            traj[:,1],  # timestamp, seconds
+        ])
+
+    traj_cols = ['position', 'frame_idx', 'time']
+    out_dict = {
+        'trackedPar' : result_list,
+        'metadata' : format_metadata_out(metadata),
+        'traj_cols' : traj_cols,
+    }
+
+    # Save to .mat file
+    sio.savemat(out_tracked_mat, out_dict)
 
 def save_trajectory_obj_to_mat(
     mat_file_name,
